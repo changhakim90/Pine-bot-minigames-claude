@@ -43,6 +43,7 @@ defineDriver('BLIND POUR', {
                 if (F.dt > 0.004 && F.dt < 0.05) dtAvg += (F.dt - dtAvg) * 0.1;
                 const pt = F.text(/^POUR (\d)\/3$/, { x: 12, y: 48, d: 60 });
                 if (!pt) return;
+                ctx.alive();                    // the pause between pours is not a stall
                 const idx = +pt.m[1] - 1;
                 if (idx !== pour) { pour = idx; holding = false; released = false; judged = false; lastMl = 0; }
                 const g = FP_GLASS[idx];
@@ -126,94 +127,57 @@ defineDriver('STIR STOP', {
     kind: 'precision', floor: 0, maxPlays: 200,
     make(ctx) {
         const cv = () => input.el('hh_fpcv');
-        const s = { omega: 0, temp: 20, dragging: false };
-        let play = false, target = null, lastA = null, phase = 'spin', served = false, mism = 0, dtLast = 1 / 60, frames = 0, waitingFor = 'play', colourOnly = false, spinFrames = 0, inputWarned = false;
+        let dragging = false, lastA = null, phase = 'spin', served = false, target = null, frames = 0, spinFrames = 0, warned = false, waitingFor = 'play', lastT = null;
         const angleOf = (c, ev) => { const p = input.gameXY(c, ev); return Math.atan2(p.y - 272, p.x - 200); };
         const wrapD = d2 => { while (d2 > Math.PI) d2 -= 6.283; while (d2 < -Math.PI) d2 += 6.283; return d2; };
-        const moveTo = (c, ang) => {
-            // dispatch a pointermove on the rim and mirror the game's omega update exactly
-            const ev = input.move(c, 200 + Math.cos(ang) * 110, 272 + Math.sin(ang) * 110, c);
-            const a2 = angleOf(c, ev);
-            if (s.dragging && lastA != null) { const d2 = wrapD(a2 - lastA); s.omega = Math.max(-14, Math.min(14, s.omega + d2 * 4)); }
-            lastA = a2;
+        const moveTo = (c, ang) => { input.move(c, 200 + Math.cos(ang) * 110, 272 + Math.sin(ang) * 110, c); };
+        // observed temperature: the °C text while it is shown (temp > 5), else inverted from the
+        // NOW colour chip (the game's own drawn colour — ~0.03 °C resolution). This is the value
+        // the game judges on, so serving by it is correct however fast the drink actually cools.
+        const obsTemp = (F, nowRect) => {
+            const tt = F.text(/^(-?\d+\.\d\d)°C$/);
+            if (tt) return +tt.m[1];
+            const rgb = F.rgb(nowRect.fs);
+            if (!rgb) return null;
+            return rgb[2] >= 254 ? -(210 - rgb[0]) / 140 * 8 : 20 - (236 - rgb[0]) / 26 * 20;
         };
+        const ST_TARGETS = []; for (let i = 15; i <= 40; i++) ST_TARGETS.push(-i / 10);
         return {
             frame(F) {
                 const c = cv();
                 if (!c || served) return;
-                // the two colour chips: fillRect(90,22,100,30) NOW and (210,22,100,30) TARGET —
-                // matched by size and row first, so a pixel of drift cannot blind the driver
                 const chips = F.rects.filter(o => Math.abs(o.w - 100) < 2 && Math.abs(o.h - 30) < 2 && Math.abs(o.y - 22) < 4);
                 const nowRect = chips.find(o => Math.abs(o.x - 90) < 4), tgtRect = chips.find(o => Math.abs(o.x - 210) < 4);
-                waitingFor = (!nowRect || !tgtRect) ? 'colour chips (play state)' : '';
-                if (!nowRect || !tgtRect) return;         // not in 'play' yet
-                if (!play) { play = true; dtLast = F.dt; return; }   // first play frame: game did one idle step (temp stays 20)
-                frames++;
-                // mirror the frame the game just ran
-                stStep(s, F.dt); dtLast = F.dt;
+                if (!nowRect || !tgtRect) { waitingFor = 'colour chips (play state)'; return; }
+                ctx.alive(); waitingFor = ''; frames++;
                 if (target == null) {
                     const tr = F.rgb(tgtRect.fs);
-                    const hit = ST_TARGETS.find(tp => sameRGB(stTempRGB(tp), tr));
-                    if (hit != null) { target = hit; ctx.log('target', target.toFixed(1) + '°C'); }
-                    else if (frames > 5) { target = -2.75; ctx.log('target colour unknown', tgtRect.fs, '— assuming', target); }
+                    const hit = ST_TARGETS.find(tp => { const g = stTempRGB(tp); return g[0] === tr[0] && g[1] === tr[1] && g[2] === tr[2]; });
+                    target = hit != null ? hit : 20 - (236 - tr[0]) / 26 * 20;
+                    ctx.log('target', target.toFixed(2) + '°C');
                 }
-                // model check against what the game drew: text while temp > 5, colour always
-                const tt = F.text(/^(-?\d+\.\d\d)°C$/);
-                if (tt) { const drawn = +tt.m[1]; if (Math.abs(drawn - s.temp) > 0.011) { mism++; s.temp = drawn; } }
-                else {
-                    const rgb = F.rgb(nowRect.fs);
-                    if (rgb && !sameRGB(rgb, stTempRGB(s.temp))) {
-                        mism++;
-                        if (config.verbose) ctx.log('colour mismatch', nowRect.fs, 'model', stTempColor(s.temp), s.temp.toFixed(3));
-                        // resync from the colour (≈0.03° resolution); the spin state is still exact
-                        s.temp = rgb[0] <= 210 && rgb[2] === 255 ? -(210 - rgb[0]) / 140 * 8 : 20 - (236 - rgb[0]) / 26 * 20;
-                    }
-                }
-                if (target == null) return;
-                ctx.acted();
-                // if the model keeps disagreeing with what is drawn, something about this page
-                // differs from the source we simulate: fall back to steering by colour alone
-                // (the chips match exactly within ~0.03 °C) rather than trusting the numbers
-                if (mism > 40 && !colourOnly) { colourOnly = true; ctx.log('model disagrees with the HUD', mism, 'times — steering by colour only'); }
-                if (colourOnly) {
-                    const same = sameRGB(F.rgb(nowRect.fs), F.rgb(tgtRect.fs));
-                    const nowT = s.temp;                    // resynced from the colour above
-                    if (phase === 'spin') {
-                        if (!s.dragging) { const ev = input.down(c, 310, 272, c); s.dragging = true; lastA = angleOf(c, ev); }
-                        moveTo(c, lastA + 0.6);
-                        if (nowT <= target + 0.05) { input.up(c, 310, 272, c); s.dragging = false; lastA = null; phase = 'settle'; }
-                    } else if (same || (Math.abs(s.omega) < 0.5 && nowT >= target)) {
-                        served = true; input.down(input.el('hh_stServe')); ctx.acted();
-                        ctx.log('served by colour at', nowT.toFixed(2), 'target', target);
-                    }
-                    return;
-                }
+                const T = obsTemp(F, nowRect);
+                if (T == null) return;
                 if (phase === 'spin') {
-                    if (!s.dragging) { const ev = input.down(c, 310, 272, c); s.dragging = true; lastA = angleOf(c, ev); spinFrames = 0; }
-                    // keep ω pinned at 14 with one small move per frame, then decide whether to let go
-                    moveTo(c, lastA + 0.6);
+                    if (!dragging) { const ev = input.down(c, 310, 272, c); dragging = true; lastA = angleOf(c, ev); spinFrames = 0; }
+                    moveTo(c, (lastA == null ? 0 : lastA) + 0.6); lastA = (lastA == null ? 0 : lastA) + 0.6;
                     spinFrames++;
-                    // sanity: after 2 s of stirring the drink must be cooling; if the HUD still shows
-                    // room temperature our pointer input is not reaching the game
-                    if (spinFrames * F.dt > 2 && s.temp > 19 && !inputWarned) { inputWarned = true; waitingFor = 'stir input is not cooling the drink'; ctx.log(waitingFor); }
-                    const bottom = stBottom(s, F.dt);
-                    if (bottom <= target - 0.012) {
-                        input.up(c, 310, 272, c); s.dragging = false; lastA = null; phase = 'settle';
-                        if (config.verbose) ctx.log('released at', s.temp.toFixed(3), 'expected bottom', bottom.toFixed(3));
-                    }
-                } else if (phase === 'settle') {
-                    // serve on the frame whose temp is nearest the target (warming 0.33°/s once the spin is dead)
-                    const next = stStep({ omega: s.omega, temp: s.temp, dragging: false }, dtLast).temp;
-                    const dNow = Math.abs(s.temp - target), dNext = Math.abs(next - target);
-                    if (dNow <= dNext && Math.abs(s.omega) < 0.5) {
-                        served = true;
-                        input.down(input.el('hh_stServe')); ctx.acted();
-                        ctx.log('served at', s.temp.toFixed(4), 'target', target, 'model mismatches', mism);
-                        learn.ema(ctx.name, 'mismatches', mism, 0.3);
+                    if (spinFrames * F.dt > 2.5 && T > 18 && !warned) { warned = true; waitingFor = 'stir input is not cooling the drink'; ctx.log(waitingFor); }
+                    // stop stirring once the drawn temperature has reached the target; residual
+                    // cooling then carries it a touch below, and it warms back — we serve on the way up
+                    if (T <= target) { input.up(c, 310, 272, c); dragging = false; lastA = null; phase = 'settle'; ctx.log('released at', T.toFixed(2)); }
+                } else {
+                    // serve when the warming drink is at/just past the target (closest achievable);
+                    // if it is still falling below target, wait for the turn
+                    const rising = lastT != null && T > lastT + 1e-4;
+                    if (T >= target - 0.03 && (rising || T >= target)) {
+                        served = true; input.down(input.el('hh_stServe')); ctx.acted();
+                        ctx.log('served at', T.toFixed(3), 'target', target);
                     }
                 }
+                lastT = T;
             },
-            state() { return { play, phase, target, temp: +s.temp.toFixed(3), omega: +s.omega.toFixed(3), dragging: s.dragging, served, mismatches: mism, colourOnly, waitingFor, frames }; }
+            state() { return { phase, target, obsTemp: lastT == null ? null : +lastT.toFixed(3), dragging, served, spinFrames, waitingFor, frames }; }
         };
     }
 });
@@ -239,6 +203,7 @@ defineDriver('ICE CARVING', {
                 if (F.has('TIME UP!')) return;
                 const tm = F.text(/^(\d+\.\d)s$/, { x: 200, y: 34, d: 4 });
                 if (!tm) return;
+                ctx.alive();
                 const left = +tm.m[1];
                 if (left >= 15) return;          // not armed yet
                 if (!armedAt) armedAt = F.t;
@@ -320,6 +285,7 @@ defineDriver('CHAMPAGNE LAUNCH', {
                 if (F.dt > 0.004 && F.dt < 0.05) dtAvg += (F.dt - dtAvg) * 0.1;
                 const bar = F.rect(30, 18, 340, 10);
                 if (!bar) return;                  // intro
+                ctx.alive();
                 if (!run) { run = true; planned = plan(); ctx.log('plan: R', planned.R.toFixed(0), 'power at fire', planned.pFire.toFixed(1), 'k', (ctx.cal.flightK || 1).toFixed(3)); return; }
                 // mirror the frame the game just ran
                 const dt = F.dt;
@@ -419,6 +385,8 @@ defineDriver('QUICK TAB', {
         return {
             frame(F) {
                 const timer = F.text(/^\d+\.\ds$/, { x: 388, y: 30, d: 4 });
+                if (!F.text(/^BILL \d\/7$/, { x: 12, y: 30, d: 6 }) && !timer) return;
+                ctx.alive();
                 if (!timer) return;
                 const bill = F.text(/^BILL (\d)\/7$/);
                 const round = bill ? +bill.m[1] : 0;
@@ -456,6 +424,7 @@ defineDriver('ORDER UP!', {
                 if (!c || failed) return;
                 const rt = F.text(/^ROUND (\d+)$/, { x: 12, y: 28, d: 4 });
                 if (!rt) return;
+                ctx.alive();                    // showing / memorising the order is not a stall
                 const round = +rt.m[1];
                 if (round !== seenRound) { seenRound = round; seen = []; }
                 // fallback recorder: bubble cocktail icon (86 px) while ordering

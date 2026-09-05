@@ -312,7 +312,7 @@ const flow = {
                     // Where Is My Shot, Glass Stack, Order Up and Table Rush have no clock: they
                     // wait for input forever. If a driver has gone this many frames without acting,
                     // it is stuck (missing artwork, an unexpected screen) — leave rather than hang.
-                    if (this.game && this.game.frames - this.game.actedAt > config.stallFrames) {
+                    if (this.game && this.game.frames - this.game.aliveAt > config.stallFrames) {
                         warn(this.game.name + ': no action for ' + config.stallFrames + ' frames — leaving the round');
                         this.leaveGame();
                     }
@@ -337,12 +337,16 @@ const flow = {
         const params = spec.tunables ? tune.pick(name, spec.tunables) : {};
         const g = learn.game(name);
         const ctx = { name, params, cal: g.cal, learn: g, target: targetFor(name), board: board.top[name] || null, frames: 0, t0: 0, acted: () => { }, log: (...a) => log(name + ':', ...a) };
-        ctx.acted = () => { if (this.game) this.game.actedAt = this.game.frames; };
+        // acted(): made progress (dispatched input). alive(): recognised my screen this frame,
+        // even with nothing to do. The stall watchdog uses liveness — a quiet Tip Catch frame or
+        // a Where Is My Shot shuffle is not a stall; only a driver that cannot find its screen is.
+        ctx.acted = () => { if (this.game) { this.game.actedAt = this.game.frames; this.game.aliveAt = this.game.frames; } };
+        ctx.alive = () => { if (this.game) this.game.aliveAt = this.game.frames; };
         // max mode: endless rounds get a wall-clock budget; drivers that can end a round on
         // purpose (Order Up, Where Is My Shot, Glass Stack) do so once it runs out
         ctx.budgetMs = config.max && !isFinite(ctx.target.v) ? config.roundBudgetMin * 60000 : Infinity;
         ctx.overBudget = () => now() - this.game.t0 > ctx.budgetMs;
-        this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0, actedAt: 0 };
+        this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0, actedAt: 0, aliveAt: 0 };
         log('playing', name, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max', '(' + ctx.target.why + ')', 'params', JSON.stringify(params));
     },
     frame(f) {

@@ -29,7 +29,7 @@ survivor-mode bot); same layout and release loop, separate script.
 | Order Up! | ROUND n KO (time budget) | punches the whole order in one frame; ends the round when the budget is spent |
 | Where Is My Shot? | ROUND n KO (time budget) | follows the cover the shot went under |
 | Fresh Squeeze | 1775ml (≈ceiling) | one gesture burst per 421 ms press cycle |
-| Tip Catch | 75 | tracks every item's speed, catches the earliest reachable good one |
+| Tip Catch | ~100 | tracks every item's speed, catches the earliest reachable good one |
 | Fly Swat | 187 | one shot per fly per frame |
 | Glass Stack | n STACKED (time budget) | looks three swings ahead for the frame that lands on the lean-cancelling spot (0.1–1.6 px) |
 | Table Rush | STAGE n (until it falls) | receding-horizon search over key plans; in crowded halls spends one hit per stage as 1.5 s of passage (a glass comes back per stage) |

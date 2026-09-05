@@ -82,7 +82,7 @@ test('blind pour driver: holds until armed, releases when ml + tail reaches the 
     const pm = env.window.pineMini;
     const cv = env.el('hh_fpcv', 'canvas');
     const ctx = cv.getContext('2d');
-    const d = pm.drivers['BLIND POUR'].make({ name: 'BLIND POUR', params: { bias: 0 }, cal: {}, target: { v: 0 }, log() { } });
+    const d = pm.drivers['BLIND POUR'].make({ name: 'BLIND POUR', params: { bias: 0 }, cal: {}, target: { v: 0 }, log() { }, acted() { }, alive() { } });
     pm.hooks.onFrame = f => d.frame(f);
     const g = pm.FP_GLASS[0];
     let ml = 0, t = 1000, released = null;
@@ -163,7 +163,7 @@ test('scheduler: targets, beaten, wantsPlay and the tuner stay inside their rang
     assert.strictEqual(pm.beaten('BLIND POUR'), true);
     for (let i = 0; i < 50; i++) {
         const p = pm.tune.pick('TIP CATCH', pm.drivers['TIP CATCH'].tunables);
-        assert.ok(p.safety >= 0 && p.safety <= 12 && p.horizon >= 40 && p.horizon <= 110);
+        assert.ok(p.safety >= 0 && p.safety <= 12 && p.horizonSec >= 0.5 && p.horizonSec <= 2.0);
         pm.tune.report('TIP CATCH', p, 50 + p.safety);
     }
     const st = pm.learn.game('TIP CATCH').tune.safety.vals;

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.0 — fixes from live play: no more skipping, warm serves, or freezes (2026-09-05)
+
+Diagnosed from `pineMini.diag()` on the live site (a ~240 Hz display, which
+turned several frame-count assumptions into bugs).
+
+- **Skipping (Where Is My Shot, Glass Stack, and others).** The stall
+  watchdog counted frames, so at 240 fps its budget was ~15 s and a game's
+  quiet phases (a shuffle, a swing, an order being shown) tripped it. A
+  driver now counts as alive once it recognises its screen, whether or not it
+  taps that frame; only a driver that cannot find its screen at all is
+  abandoned.
+- **Table Rush froze the tab.** The planner's horizon scaled with the frame
+  rate (0.35 s ÷ 4 ms = ~87 steps) and ran over every one of up to 52 guests,
+  729 plans a frame — hundreds of millions of ops a second. The search now
+  uses a fixed 33 ms step (12 steps) over the nearest 14 guests, independent
+  of refresh.
+- **Stir Stop served warm (±3–4).** The thermal model predicted more cooling
+  than the live game delivered, so it released early. It is now driven by the
+  temperature the game actually draws (the °C text, or the NOW colour chip
+  below 5°): it stirs until the drawn temperature reaches the target and
+  serves as it warms back through it — self-correcting whatever the real
+  cooling rate. ±0.00–0.05 on the reference page.
+- **Tip Catch caught almost nothing (22).** Its lookahead was in frames, so
+  at 240 fps it saw only 0.29 s ahead. It is in seconds now (default 1.2 s),
+  and the bad-item avoidance no longer rejects a good catch unless a bad item
+  would truly share the 37 px window: ~100 points, up from 75.
+- `pineMini.diag()` now carries each running driver's own `state` (Stir Stop
+  temp/phase, Tip Catch target, Table Rush position, Where Is My Shot round).
+
 ## 0.4.2 — pause actually pauses (2026-09-05)
 
 The panel button and `pineMini.pause()` / `resume()` now freeze the bot in

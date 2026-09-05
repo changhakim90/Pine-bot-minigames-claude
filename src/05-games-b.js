@@ -12,13 +12,15 @@
 defineDriver('WHERE IS MY SHOT?', {
     kind: 'unbounded', defaultTarget: 25,
     make(ctx) {
-        let round = 0, shotIdx = -1, picked = 0, failed = false;
+        let round = 0, shotIdx = -1, picked = 0, failed = false, waitingFor = 'ROUND hud', lastN = 0;
         return {
             frame(F) {
                 const c = input.el('hh_fpcv');
                 if (!c || failed) return;
                 const rt = F.text(/^ROUND (\d+)$/, { x: 12, y: 28, d: 4 });
-                if (!rt) return;
+                if (!rt) { waitingFor = 'ROUND hud'; return; }
+                ctx.alive();                    // on the WS screen — watching/shuffling is not a stall
+                waitingFor = '';
                 if (+rt.m[1] !== round) { round = +rt.m[1]; shotIdx = -1; picked = 0; }
                 // Covers by sprite name; if the artwork is unnamed for any reason, fall back to
                 // the shadow ellipses the game draws once per cover (ry 8) and under the shot (ry 7).
@@ -45,8 +47,10 @@ defineDriver('WHERE IS MY SHOT?', {
                 if (round >= ctx.target.v || ctx.overBudget()) { idx = (idx + 1) % covers.length; failed = true; ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')'); }
                 else if (shotIdx < 0) ctx.log('lost the shot this round — guessing');
                 input.down(c, covers[idx].cx, 288, c);
+                lastN = covers.length;
                 ctx.acted();
-            }
+            },
+            state() { return { round, shotIdx, picked, failed, waitingFor, covers: lastN }; }
         };
     }
 });
@@ -81,6 +85,7 @@ defineDriver('FRESH SQUEEZE', {
                 if (stopped) return;
                 if (F.has('TIME UP!')) { stopped = true; if (timer) clearTimeout(timer); return; }
                 if (!F.has('FRESH LIME JUICE')) return;
+                ctx.alive();
                 if (!play) { play = true; burst(); return; }
                 if (now() - lastBurst > 470) burst();      // safety net if a timer was lost
             },
@@ -99,13 +104,17 @@ const TC_GOOD = { bill_10000: 2, bill_50000: 3, coin_gold: 1 };
 const TC_BAD = /^(bottle_|tc_receipt|tc_env|tc_cap)/;
 defineDriver('TIP CATCH', {
     kind: 'capped',
-    tunables: { safety: { min: 0, max: 12, step: 2, init: 4, explore: 0.2 }, horizon: { min: 40, max: 110, step: 10, init: 70, explore: 0.15 } },
+    tunables: { safety: { min: 0, max: 12, step: 2, init: 4, explore: 0.2 }, horizonSec: { min: 0.5, max: 2.0, step: 0.25, init: 1.2, explore: 0.15 } },
     make(ctx) {
-        let prev = [], jarX = 200, lastTX = null;
+        let prev = [], jarX = 200, lastTX = null, waitingFor = 'play', chasing = false;
         return {
             frame(F) {
                 const c = input.el('hh_fpcv');
                 if (!c || F.has('TIME UP!')) return;
+                // in play once the coin/timer HUD is up — a frame with no reachable item is not a stall
+                if (!F.text(/^x \d+$/, { x: 44, y: 38, d: 8 }) && !F.text(/^\d+\.\ds$/, { x: 280, y: 38, d: 10 })) { waitingFor = 'tip-catch HUD'; return; }
+                ctx.alive();
+                waitingFor = '';
                 const dt = F.dt;
                 // The jar is where the game's own lerp puts it: jarX += (jarTX - jarX)·min(1, dt·14).
                 // Read it from the sprite when it is drawn, and keep the model in step so a missing
@@ -126,7 +135,7 @@ defineDriver('TIP CATCH', {
                 }
                 prev = items;
                 const q = 1 - Math.min(1, dt * 14);
-                const H = ctx.params.horizon;                       // frames of lookahead
+                const H = ctx.params.horizonSec / dt;               // lookahead in FRAMES (horizon is seconds)
                 const reach = ctx.params.safety;                    // px inside the 37 px window we insist on
                 // frames until an item reaches the window entry (y > 318) and exit (y ≥ 352)
                 const eta = it => ({ in: Math.max(0, (318.5 - it.y) / (it.vy * dt)), out: Math.max(0, (351.5 - it.y) / (it.vy * dt)) });
@@ -139,8 +148,9 @@ defineDriver('TIP CATCH', {
                     const d0 = Math.abs(it.x - jarX);
                     const need = d0 <= 37 - reach ? 0 : Math.log((37 - reach) / d0) / Math.log(q);
                     if (need > e.out - 1) continue;
-                    // would we swallow a bad one that is in the window at the same time and near this x?
-                    const risky = bads.some(b => Math.abs(b.x - it.x) < 74 && b.e.in < e.out + 2 && b.e.out > e.in - 2);
+                    // reject only a bad item that would actually be in the catch window (|dx|<40)
+                    // at the same time we are there (overlapping frames) — 37px is the catch radius
+                    const risky = bads.some(b => Math.abs(b.x - it.x) < 40 && b.e.in < e.out && b.e.out > e.in);
                     if (risky) continue;
                     const score = e.in - it.good * 3;
                     if (!best || score < best.score) best = { it, score };
@@ -148,13 +158,15 @@ defineDriver('TIP CATCH', {
                 let tx;
                 if (best) tx = best.it.x;
                 else {
-                    // nothing catchable: dodge any bad item about to enter the window near the jar
-                    const threat = bads.find(b => b.e.in < 14 && Math.abs(b.x - jarX) < 60);
+                    // nothing catchable: dodge a bad item about to be caught; otherwise hold
+                    const threat = bads.find(b => b.e.in * dt < 0.08 && Math.abs(b.x - jarX) < 40);
                     tx = threat ? (threat.x > jarX ? threat.x - 80 : threat.x + 80) : jarX;
                 }
                 tx = clamp(tx, 36, 364);
+                chasing = !!best;
                 if (lastTX == null || Math.abs(tx - lastTX) > 0.01) { input.move(c, tx, 380, c); lastTX = tx; ctx.acted(); }
-            }
+            },
+            state() { return { jarX: Math.round(jarX), targetX: lastTX == null ? null : Math.round(lastTX), items: prev.length, chasingGood: chasing, waitingFor }; }
         };
     }
 });
@@ -172,6 +184,7 @@ defineDriver('FLY SWAT', {
                 const c = input.el('hh_fpcv');
                 if (!c || F.has('TIME UP!')) return;
                 if (!F.text(/^x \d+$/, { x: 14, y: 38, d: 4 })) return;      // HUD only in 'play'
+                ctx.alive();
                 for (const o of F.imgs) {
                     if (!/^fs_fly[12]$/.test(o.src)) continue;      // the intro's big fly is fs_bigfly
                     input.down(c, o.cx, o.cy, c); shots++; ctx.acted();
@@ -200,6 +213,7 @@ defineDriver('GLASS STACK', {
                 if (!c || ended) return;
                 const lv = F.text(/^(\d+)$/, { x: 200, y: 42, d: 4 });
                 if (!lv || !F.has('STACKED')) { prevX = null; return; }
+                ctx.alive();                    // waiting for the swing to line up is not a stall
                 const level = +lv.m[1];
                 // Pieces by sprite name; when a piece image is missing the game draws
                 // fillRect(x - w/2, y, w, h) instead, so read those in the same order.
@@ -286,6 +300,7 @@ defineDriver('TABLE RUSH', {
                 if (!c) return;
                 const st = F.text(/^STAGE (\d+)$/, { x: 26, y: 29, d: 4 });
                 if (!st) { if (F.has('TRAY DOWN') || F.has('STAGE')) setKeys([0, 0]); return; }
+                ctx.alive();
                 const lv = +st.m[1];
                 const t = F.t, dt = F.dt;
                 if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; hitsThisStage = 0; bestY = 1e9; stuckFrames = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - ctx.t0) / 1000).toFixed(1) + 's'); }
@@ -324,12 +339,13 @@ defineDriver('TABLE RUSH', {
                 if (me.y < bestY - 2) { bestY = me.y; stuckFrames = 0; } else stuckFrames++;
                 const stuck = stuckFrames > 0.8 / dt;
                 const budget0 = dying || !(stuck || mobs.length >= 24) ? 0 : Math.max(0, glasses - 2 - hitsThisStage);   // never spend the last-but-one glass
-                // 0.35 s horizon in three segments at the game's own frame step — guests turn
-                // every 0.5–1.8 s, so longer predictions are mostly wrong; only guests that could
-                // possibly be reached in that time take part (the rest cost nothing)
-                const step = dt, H = Math.max(6, Math.round(0.35 / step)), SEG = Math.ceil(H / 3), spd = 118 * step;
-                const reach = 118 * 1.45 * 0.35 + 160;
-                const near = mobs.filter(m => hypot(m.x - me.x, m.y - me.y) < reach);
+                // 0.4 s horizon in three segments at a FIXED 33 ms step — independent of the
+                // display's refresh, so the search cost cannot explode on a 240 Hz screen (it did,
+                // freezing the tab). Only the nearest guests take part; the rest cannot be reached.
+                const step = 1 / 30, H = 12, SEG = 4, spd = 118 * step;
+                const reach = 118 * 1.45 * 0.4 + 160;
+                const near = mobs.filter(m => hypot(m.x - me.x, m.y - me.y) < reach)
+                    .sort((a, b) => hypot(a.x - me.x, a.y - me.y) - hypot(b.x - me.x, b.y - me.y)).slice(0, 14);
                 const mx = [], my = [];
                 for (let k = 1; k <= H; k++) { const ax = [], ay = []; for (const m of near) { ax.push(m.x + m.vx * step * k); ay.push(m.y + m.vy * step * k); } mx.push(ax); my.push(ay); }
                 let best = null;
@@ -374,7 +390,8 @@ defineDriver('TABLE RUSH', {
                 lastAct = act;
             },
             stop() { setKeys([0, 0]); },
-            result(m) { setKeys([0, 0]); ctx.log('stage', m && m.v, 'target', ctx.target.v); }
+            result(m) { setKeys([0, 0]); ctx.log('stage', m && m.v, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max'); },
+            state() { return { stage, glasses, me: { x: Math.round(me.x), y: Math.round(me.y) }, mobs: prevMobs.length, act, invMs: Math.max(0, Math.round(invUntil - (api.frame ? api.frame.t : 0))) }; }
         };
     }
 });
