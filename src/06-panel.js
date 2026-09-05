@@ -80,6 +80,7 @@ const api = {
         const d = {
             version: SCRIPT_VERSION, state: flow.state, game: g && g.name, frames: g && g.frames, actedAt: g && g.actedAt, err: flow.err,
             speed: api.speed(), target: g && g.ctx.target, params: g && g.params,
+            driver: g && g.driver.state ? safe(() => g.driver.state(), 'state() threw') : null,
             frame: f ? { t: Math.round(f.t), dt: +f.dt.toFixed(4), canvas: f.id, imgs: count(f.imgs.map(o => o.src)), texts: f.texts.map(o => o.s + '@' + Math.round(o.x) + ',' + Math.round(o.y)), rects: f.rects.length, arcs: f.arcs.length, ellipses: f.ellipses.length,
                 sprites: f.imgs.filter(o => !/floor|bg_|logo/.test(o.src)).slice(0, 40).map(o => o.src + '@' + Math.round(o.cx) + ',' + Math.round(o.cy) + ' ' + Math.round(o.w) + 'x' + Math.round(o.h)) } : null,
             results: flow.results.slice(-8).map(r => r.name + ' ' + r.txt + (r.fast ? ' (fast)' : ''))

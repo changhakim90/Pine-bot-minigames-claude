@@ -127,7 +127,7 @@ defineDriver('STIR STOP', {
     make(ctx) {
         const cv = () => input.el('hh_fpcv');
         const s = { omega: 0, temp: 20, dragging: false };
-        let play = false, target = null, lastA = null, phase = 'spin', served = false, mism = 0, dtLast = 1 / 60, frames = 0;
+        let play = false, target = null, lastA = null, phase = 'spin', served = false, mism = 0, dtLast = 1 / 60, frames = 0, waitingFor = 'play', colourOnly = false, spinFrames = 0, inputWarned = false;
         const angleOf = (c, ev) => { const p = input.gameXY(c, ev); return Math.atan2(p.y - 272, p.x - 200); };
         const wrapD = d2 => { while (d2 > Math.PI) d2 -= 6.283; while (d2 < -Math.PI) d2 += 6.283; return d2; };
         const moveTo = (c, ang) => {
@@ -141,7 +141,11 @@ defineDriver('STIR STOP', {
             frame(F) {
                 const c = cv();
                 if (!c || served) return;
-                const nowRect = F.rect(90, 22, 100, 30), tgtRect = F.rect(210, 22, 100, 30);
+                // the two colour chips: fillRect(90,22,100,30) NOW and (210,22,100,30) TARGET —
+                // matched by size and row first, so a pixel of drift cannot blind the driver
+                const chips = F.rects.filter(o => Math.abs(o.w - 100) < 2 && Math.abs(o.h - 30) < 2 && Math.abs(o.y - 22) < 4);
+                const nowRect = chips.find(o => Math.abs(o.x - 90) < 4), tgtRect = chips.find(o => Math.abs(o.x - 210) < 4);
+                waitingFor = (!nowRect || !tgtRect) ? 'colour chips (play state)' : '';
                 if (!nowRect || !tgtRect) return;         // not in 'play' yet
                 if (!play) { play = true; dtLast = F.dt; return; }   // first play frame: game did one idle step (temp stays 20)
                 frames++;
@@ -167,10 +171,31 @@ defineDriver('STIR STOP', {
                 }
                 if (target == null) return;
                 ctx.acted();
+                // if the model keeps disagreeing with what is drawn, something about this page
+                // differs from the source we simulate: fall back to steering by colour alone
+                // (the chips match exactly within ~0.03 °C) rather than trusting the numbers
+                if (mism > 40 && !colourOnly) { colourOnly = true; ctx.log('model disagrees with the HUD', mism, 'times — steering by colour only'); }
+                if (colourOnly) {
+                    const same = sameRGB(F.rgb(nowRect.fs), F.rgb(tgtRect.fs));
+                    const nowT = s.temp;                    // resynced from the colour above
+                    if (phase === 'spin') {
+                        if (!s.dragging) { const ev = input.down(c, 310, 272, c); s.dragging = true; lastA = angleOf(c, ev); }
+                        moveTo(c, lastA + 0.6);
+                        if (nowT <= target + 0.05) { input.up(c, 310, 272, c); s.dragging = false; lastA = null; phase = 'settle'; }
+                    } else if (same || (Math.abs(s.omega) < 0.5 && nowT >= target)) {
+                        served = true; input.down(input.el('hh_stServe')); ctx.acted();
+                        ctx.log('served by colour at', nowT.toFixed(2), 'target', target);
+                    }
+                    return;
+                }
                 if (phase === 'spin') {
-                    if (!s.dragging) { const ev = input.down(c, 310, 272, c); s.dragging = true; lastA = angleOf(c, ev); }
+                    if (!s.dragging) { const ev = input.down(c, 310, 272, c); s.dragging = true; lastA = angleOf(c, ev); spinFrames = 0; }
                     // keep ω pinned at 14 with one small move per frame, then decide whether to let go
                     moveTo(c, lastA + 0.6);
+                    spinFrames++;
+                    // sanity: after 2 s of stirring the drink must be cooling; if the HUD still shows
+                    // room temperature our pointer input is not reaching the game
+                    if (spinFrames * F.dt > 2 && s.temp > 19 && !inputWarned) { inputWarned = true; waitingFor = 'stir input is not cooling the drink'; ctx.log(waitingFor); }
                     const bottom = stBottom(s, F.dt);
                     if (bottom <= target - 0.012) {
                         input.up(c, 310, 272, c); s.dragging = false; lastA = null; phase = 'settle';
@@ -187,7 +212,8 @@ defineDriver('STIR STOP', {
                         learn.ema(ctx.name, 'mismatches', mism, 0.3);
                     }
                 }
-            }
+            },
+            state() { return { play, phase, target, temp: +s.temp.toFixed(3), omega: +s.omega.toFixed(3), dragging: s.dragging, served, mismatches: mism, colourOnly, waitingFor, frames }; }
         };
     }
 });

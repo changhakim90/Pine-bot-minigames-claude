@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 — Stir Stop diagnostics and tolerance (2026-09-05)
+
+- Stir Stop finds its colour chips by size and row (a pixel of drift cannot
+  blind it), falls back to steering by colour alone if the model disagrees
+  with the HUD repeatedly, and reports when two seconds of stirring have not
+  cooled the drink (pointer input not reaching the game).
+- `pineMini.diag()` now includes the driver's own state (Stir Stop: phase,
+  target, model temperature and spin, mismatches, what it is waiting for).
+
 ## 0.4.0 — max mode; Glass Stack and Table Rush fixed for real (2026-09-05)
 
 **Max mode (default).** Every game now plays for the most a round allows.
