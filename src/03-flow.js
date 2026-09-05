@@ -116,6 +116,47 @@ const board = {
 };
 board.load();
 
+// ---------------------------------------------------------------- assets
+// The game downloads a mini game's artwork only when its card is picked, while
+// the HOW TO PLAY panel is up. A driver that reads sprites therefore has to
+// start AFTER they exist — the more so with a page-speed extension, where the
+// bot's own waits are compressed but the network is not. These are the files
+// each game's loader asks for (from the game's source); the bot warms the very
+// same URLs and starts the round once they have settled.
+const ASSETS = {
+    'BLIND POUR': ['fp_bg', 'fp_bottle', 'fp_logo', 'fp_shot', 'fp_jigger', 'fp_rocks'],
+    'STIR STOP': ['st_glass', 'st_ice1', 'st_ice2', 'st_top', 'st_spoon', 'st_logo'],
+    'ICE CARVING': ['ic_ice', 'ic_pick', 'ic_broke', 'ic_logo'],
+    'CHAMPAGNE LAUNCH': ['cl_run1', 'cl_run2', 'cl_run3', 'cl_run4', 'cl_run5', 'cl_skid', 'cl_cork', 'cl_logo'],
+    'SHAKE MASTER': ['sm_ice1', 'sm_ice2', 'sm_ice3', 'sm_cap1', 'sm_cap2', 'sm_closed', 'sm_logo'],
+    'QUICK TAB': ['qt_receipt', 'qt_logo', 'qt_cust1', 'qt_cust2', 'qt_cust3', 'qt_cust4', 'qt_cust5', 'qt_cust6', 'qt_cust7'],
+    'ORDER UP!': ['ou_pos', 'ou_logo'].concat(Array.from({ length: 10 }, (_, i) => 'ou_ck' + i), Array.from({ length: 8 }, (_, i) => 'ou_cu' + (i + 1))),
+    'WHERE IS MY SHOT?': ['ws_cover', 'ws_shot', 'ws_logo'],
+    'FRESH SQUEEZE': ['sq_basket', 'sq_board', 'sq_closed', 'sq_cup', 'sq_half', 'sq_lime', 'sq_logo', 'sq_open', 'sq_spent', 'sq_trash'],
+    'TIP CATCH': ['tc_jar', 'tc_receipt', 'tc_env', 'tc_cap', 'tc_logo', 'bill_10000', 'bill_50000', 'coin_gold', 'bottle_whiskey', 'bottle_gin', 'bottle_rum'],
+    'FLY SWAT': ['fs_logo', 'fs_bigfly', 'fs_fly1', 'fs_fly2', 'fs_basket', 'fs_basket2', 'fs_basket3'],
+    'GLASS STACK': ['gs_tray', 'gs_hand', 'gs_logo', 'gs_plate1', 'gs_plate1b', 'gs_plate1c', 'gs_plate2', 'gs_plate2b', 'gs_plate2c', 'gs_wine', 'gs_wineb', 'gs_coupe', 'gs_coupeb', 'gs_shot', 'gs_shotb', 'gs_rocks', 'gs_highball', 'gs_martini', 'gs_pick'],
+    'TABLE RUSH': ['dg_waiter', 'dg_cust1', 'dg_cust2', 'dg_cust3', 'dg_cust4', 'dg_cust5', 'dg_cust6', 'dg_floor', 'dg_bar', 'dg_table', 'dg_glass1', 'dg_glass2', 'dg_glass3', 'dg_logo']
+};
+const preload = {
+    game: null, total: 0, done: 0, started: 0, imgs: [],
+    start(name) {
+        this.game = name; this.done = 0; this.imgs = []; this.started = now();
+        const list = ASSETS[name] || [];
+        this.total = list.length;
+        for (const k of list) {
+            const im = new Image();
+            const settle = () => { this.done++; };
+            im.onload = settle; im.onerror = settle;
+            im.src = 'assets/' + k + '.png';
+            this.imgs.push(im);
+        }
+    },
+    // ready when every request has settled (loaded or 404'd) — a real network event,
+    // so a page-speed extension cannot fast-forward past it
+    ready() { return !this.total || this.done >= this.total; }
+};
+
 // ---------------------------------------------------------------- drivers registry
 // A driver spec: { kind:'unbounded'|'capped'|'precision', floor, defaultTarget, tunables,
 //                  make(game) → { frame(F), tick(), stop(), result(m) } }
@@ -129,7 +170,9 @@ function targetFor(name) {
     const g = learn.game(name);
     if (spec.kind === 'precision') return { v: spec.floor == null ? 0 : spec.floor, low: true, why: 'floor' };
     if (spec.kind === 'unbounded') {
-        let v = (config.e2eTargets && config.e2eTargets[name]) || spec.defaultTarget || 10;
+        const forced = (config.targets && config.targets[name]) || (config.e2eTargets && config.e2eTargets[name]);
+        if (forced) return { v: forced, low: false, why: 'set' };
+        let v = spec.defaultTarget || 10;
         if (top && !top.low) v = Math.ceil(Math.max(top.v * (1 + config.margin), top.v + config.minMargin));
         if (g.best && !g.best.low && g.best.v >= v && top && g.best.v > top.v) v = g.best.v;    // already there: hold
         return { v, low: false, why: top ? 'board' : 'default' };
@@ -230,6 +273,7 @@ const flow = {
                     const card = [...d.querySelectorAll('#hh_sbwrap2 .gcard')].find(c => { const n = c.querySelector('.gname'); return n && n.textContent.trim() === name; });
                     if (!card) { warn('no card for', name); this.since = now(); break; }
                     this.beginGame(name);
+                    preload.start(name);
                     input.click(card);
                     this.set('howto');
                     break;
@@ -237,8 +281,14 @@ const flow = {
                 case 'howto': {
                     const ht = input.el('hh_howto');
                     if (ht && !ht.classList.contains('hidden')) {
-                        if (this.age() >= config.howtoWaitMs) { hooks.lastT = 0; input.down(ht); this.set('game'); }
-                    } else if (this.age() > 8000) { warn('how-to screen never came'); this.endGame(); this.set('hub'); }
+                        // start only once the artwork has arrived: the drivers read sprites, and
+                        // the game itself draws crude fallbacks (rects/discs) until the art lands
+                        const waited = this.age() >= config.howtoWaitMs;
+                        if (waited && (preload.ready() || this.age() >= config.howtoMaxMs)) {
+                            if (!preload.ready()) warn('starting with ' + (preload.total - preload.done) + '/' + preload.total + ' assets still loading');
+                            hooks.lastT = 0; input.down(ht); this.set('game');
+                        }
+                    } else if (this.age() > 30000) { warn('how-to screen never came'); this.endGame(); this.set('hub'); }
                     break;
                 }
                 case 'game': {
@@ -246,7 +296,13 @@ const flow = {
                     if (rr && !rr.classList.contains('hidden')) { this.set('result'); break; }
                     if (this.game && this.game.driver && this.game.driver.tick) this.game.driver.tick();
                     if (!input.visible(input.el('hh_game')) && this.age() > 3000) { warn('game screen gone'); this.endGame(); this.set('hub'); }
-                    if (this.age() > 20 * 60000) { warn('game timeout'); this.endGame(); this.set('hub'); }
+                    // Where Is My Shot, Glass Stack, Order Up and Table Rush have no clock: they
+                    // wait for input forever. If a driver has gone this many frames without acting,
+                    // it is stuck (missing artwork, an unexpected screen) — leave rather than hang.
+                    if (this.game && this.game.frames - this.game.actedAt > config.stallFrames) {
+                        warn(this.game.name + ': no action for ' + config.stallFrames + ' frames — leaving the round');
+                        this.leaveGame();
+                    }
                     break;
                 }
                 case 'result': {
@@ -267,8 +323,9 @@ const flow = {
         const spec = drivers[name];
         const params = spec.tunables ? tune.pick(name, spec.tunables) : {};
         const g = learn.game(name);
-        const ctx = { name, params, cal: g.cal, learn: g, target: targetFor(name), board: board.top[name] || null, frames: 0, t0: 0, log: (...a) => log(name + ':', ...a) };
-        this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0 };
+        const ctx = { name, params, cal: g.cal, learn: g, target: targetFor(name), board: board.top[name] || null, frames: 0, t0: 0, acted: () => { }, log: (...a) => log(name + ':', ...a) };
+        ctx.acted = () => { if (this.game) this.game.actedAt = this.game.frames; };
+        this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0, actedAt: 0 };
         log('playing', name, 'target', ctx.target.v, '(' + ctx.target.why + ')', 'params', JSON.stringify(params));
     },
     frame(f) {
@@ -287,7 +344,7 @@ const flow = {
         if (g.driver.result) safe(() => g.driver.result(m, txt));
         const spec = drivers[g.name];
         if (spec.tunables && m) tune.report(g.name, g.params, m.low ? -m.v : m.v);
-        const rec = { name: g.name, txt, v: m ? m.v : null, at: Date.now(), best: nb, frames: g.frames, ms: Math.round(now() - g.t0) };
+        const rec = { name: g.name, txt, v: m ? m.v : null, at: Date.now(), best: nb, frames: g.frames, ms: Math.round(now() - g.t0), dt: +hooks.dtMean.toFixed(4), fast: hooks.dtCapped > 0.5 };
         this.results.push(rec);
         if (this.results.length > 300) this.results.splice(0, this.results.length - 300);
         store.set('results', this.results);
@@ -295,6 +352,13 @@ const flow = {
         const top = board.top[g.name];
         log('result', g.name, '→', txt, nb ? '(new best)' : '', top ? ('board #1: ' + top.txt) : '');
         this.endGame();
+    },
+    // give up on a round that cannot be played (nothing to click) and go back to the hub
+    leaveGame() {
+        this.endGame();
+        const bb = input.el('hh_backBtn');
+        if (bb && !bb.classList.contains('hidden')) input.click(bb);
+        this.set('hub');
     },
     endGame() {
         const g = this.game;

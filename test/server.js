@@ -44,10 +44,11 @@ function png(w, h, rgb) {
 }
 const cache = new Map();
 function placeholder(name) {
-    // a few assets are read for their aspect ratio; keep them square unless known
-    let w = 64, h = 64;
+    // Bigger than every maxW the game keys with (260..600), so fpKey's downscale
+    // path — which copies canvas→canvas — runs here as it does on the real site.
+    let w = 640, h = 640;
     if (/deco|strip|ribbon/.test(name)) { w = 900; h = 120; }
-    if (/bg_|logo/.test(name)) { w = 400; h = 240; }
+    if (/bg_|logo/.test(name)) { w = 700; h = 420; }
     const key = w + 'x' + h;
     if (!cache.has(key)) cache.set(key, png(w, h, [40, 90, 200]));
     return cache.get(key);

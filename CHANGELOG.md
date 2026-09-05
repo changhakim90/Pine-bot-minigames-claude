@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.3.0 — sprite names survive keying; nothing waits on artwork (2026-09-05)
+
+**The bug behind "the bot isn't clicking".** The game keys the white background
+out of most sprites with `fpKey()`, which draws the image into a canvas and —
+whenever the image is wider than that game's `maxW` — copies *that canvas into
+a second one*. The bot's sprite naming only followed image→canvas draws, so on
+the real site (large artwork) every keyed sprite arrived nameless: Tip Catch
+never found `tc_jar` and never moved the jar, Fly Swat never matched
+`fs_fly1/2`, Where Is My Shot never found `ws_cover`. The tests missed it
+because the placeholder art was 64 px — below every `maxW`, so the downscale
+path never ran. Names now follow canvas→canvas draws, the test art is 640 px,
+and a unit test asserts the name survives a keyed downscale.
+
+**Nothing waits on artwork any more.** The game only downloads a mini game's
+art once its card is picked, so a fast bot (and any page-speed extension, which
+compresses the bot's waits but not the network) could start a round before the
+sprites existed — and Where Is My Shot, Glass Stack, Order Up and Table Rush
+have no clock, so they waited for input forever.
+
+- the bot now warms the same asset URLs the game is about to request and leaves
+  the HOW TO PLAY screen when they have settled (a real network event, not a
+  timer), up to `howtoMaxMs`;
+- Glass Stack reads the rectangles, Table Rush the discs and Where Is My Shot
+  the cup geometry that the game draws when a sprite is missing, so a slow load
+  degrades the score instead of hanging the round;
+- Tip Catch tracks the jar through the game's own lerp when its sprite is late;
+- a watchdog leaves any round where the driver has not acted for
+  `stallFrames` (3600) frames.
+
+**Champagne Launch aims much further.** Nothing caps `power`, and the game
+accepts taps during the launch hold too, so the driver keeps pumping while
+there is still room to reach 45°. Default target 300 m → 2000 m; it landed
+2696–2700 m, exactly as predicted. Set your own with
+`pineMini.target('CHAMPAGNE LAUNCH', 20000)`.
+
+**Also**
+
+- `pineMini.target(game, value)` — per-game target for any unbounded game,
+  persisted; `pineMini.target(game, null)` clears it.
+- `pineMini.speed()` and a panel line report the frame regime: a page-speed
+  extension shows up as dt pinned at the engines' 50 ms cap, which is where
+  precision (Blind Pour, Stir Stop, Glass Stack) is lost.
+- The panel's *hide* now collapses to a "▸ PineMini" chip that restores it
+  (Ctrl+Shift+P still toggles); results record the mean dt and a `fast` flag.
+
 ## 0.2.1 — Table Rush spends hits as passage (2026-09-05)
 
 - Table Rush: the planner now searches three-segment key plans (9³ actions,

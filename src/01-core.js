@@ -66,7 +66,10 @@ const DEFAULT_CONFIG = {
     games: GAME_NAMES,      // queue; order is followed on the first pass
     loop: true,             // keep replaying unbeaten / improvable games after the first pass
     stopWhenBeaten: false,  // stop once every game beats the board's #1 (else keep improving)
-    howtoWaitMs: 1400,      // let the game warm its assets on the HOW TO PLAY screen
+    howtoWaitMs: 1200,      // minimum time on the HOW TO PLAY screen
+    howtoMaxMs: 30000,      // ...and the longest to wait there for the game's artwork
+    stallFrames: 3600,      // frames a driver may go without acting before the round is abandoned (~1 min)
+    targets: {},            // per-game target override, e.g. {'ORDER UP!': 60}
     resultWaitMs: 900,      // read the result screen this long before pressing OK
     margin: 0.10,           // unbounded games aim this far above the board's #1 (fraction)
     minMargin: 2,           // ...and at least this many units above it
@@ -90,7 +93,9 @@ const hooks = {
     cur: null,          // ops being recorded for the callback running now
     onFrame: null,      // function(frame)
     motion: null,       // the game's devicemotion listener (Shake Master)
-    listeners: []       // {type, fn, target}
+    listeners: [],      // {type, fn, target}
+    dtMean: 1 / 60,     // rolling mean of the dt the engines compute
+    dtCapped: 0         // fraction of frames at the engines' 0.05 cap (page-speed extensions pin it there)
 };
 
 function imgName(src) {
@@ -122,9 +127,16 @@ function installHooks() {
                         const cur = hooks.cur;
                         if (cur) { try { rec.call(this, cur, arguments); } catch (e) { } }
                     } else if (name === 'drawImage' && !cv.id && !cv.__pmSrc) {
-                        // offscreen keying canvases (fpKey) inherit the name of the image copied into them
+                        // Offscreen keying canvases inherit the name of what is copied into them.
+                        // fpKey() draws the <img> into one canvas, then — whenever the image is
+                        // wider than the game's maxW — copies THAT canvas into a smaller one, so
+                        // the name has to survive canvas→canvas draws too or every keyed sprite
+                        // (ws_cover, fs_fly1, ou_ck3, tc_jar…) reaches us nameless.
                         const im = arguments[0];
-                        if (im && im.tagName === 'IMG') cv.__pmSrc = imgName(im);
+                        if (im) {
+                            if (im.tagName === 'IMG') cv.__pmSrc = imgName(im);
+                            else if (im.__pmSrc) cv.__pmSrc = im.__pmSrc;
+                        }
                     }
                 }
                 return nat.apply(this, arguments);
@@ -244,6 +256,10 @@ function publishFrame(t, ops) {
     // ops of one rAF callback; the canvas id comes from the DOM element the ops were drawn on
     const f = new Frame(t, ops);
     hooks.frames++;
+    if (f.dt > 0.0005) {
+        hooks.dtMean += (f.dt - hooks.dtMean) * 0.02;
+        hooks.dtCapped += ((f.dt >= 0.0499 ? 1 : 0) - hooks.dtCapped) * 0.02;
+    }
     f.id = currentGameCanvasId();
     const cb = hooks.onFrame;
     if (cb) { try { cb(f); } catch (e) { warn('frame handler', e); } }

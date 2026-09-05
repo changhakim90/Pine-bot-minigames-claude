@@ -20,20 +20,32 @@ defineDriver('WHERE IS MY SHOT?', {
                 const rt = F.text(/^ROUND (\d+)$/, { x: 12, y: 28, d: 4 });
                 if (!rt) return;
                 if (+rt.m[1] !== round) { round = +rt.m[1]; shotIdx = -1; picked = 0; }
-                const covers = F.img('ws_cover');
-                const shot = F.img('ws_shot')[0];
+                // Covers by sprite name; if the artwork is unnamed for any reason, fall back to
+                // the shadow ellipses the game draws once per cover (ry 8) and under the shot (ry 7).
+                let covers = F.img('ws_cover');
+                let shot = F.img('ws_shot')[0];
+                if (!covers.length) covers = F.ellipses.filter(o => Math.abs(o.y - 332) < 1 && Math.abs(o.ry - 8) < 0.6).map(o => ({ cx: o.x }));
+                if (!shot) { const e = F.ellipses.find(o => Math.abs(o.y - 330) < 1 && Math.abs(o.ry - 7) < 0.6); if (e) shot = { cx: e.x }; }
                 if (shot && covers.length && (F.has('WATCH THE SHOT!') || F.has('FIND IT!'))) {
                     let best = -1, bd = 1e9;
                     covers.forEach((o, i) => { const d = Math.abs(o.cx - shot.cx); if (d < bd) { bd = d; best = i; } });
                     if (bd < 3) shotIdx = best;
                 }
                 if (!F.has('WHERE IS IT? TAP!') || picked === round) return;
-                if (!covers.length) return;
+                if (!covers.length) {
+                    // nothing recognisable was drawn (artwork still loading): the cup positions are
+                    // pure geometry — cupX(slot, n) with n = min(5, 1 + round) — so tap anyway
+                    // rather than sit in a round that never ends
+                    const n = Math.min(5, 1 + round), sp = Math.min(96, 340 / Math.max(1, n - 1));
+                    covers = Array.from({ length: n }, (_, i) => ({ cx: 200 + (i - (n - 1) / 2) * sp }));
+                    ctx.log('covers not drawn — tapping by geometry');
+                }
                 picked = round;
                 let idx = shotIdx >= 0 ? shotIdx : 0;
                 if (round >= ctx.target.v) { idx = (idx + 1) % covers.length; failed = true; ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')'); }
                 else if (shotIdx < 0) ctx.log('lost the shot this round — guessing');
                 input.down(c, covers[idx].cx, 288, c);
+                ctx.acted();
             }
         };
     }
@@ -60,7 +72,7 @@ defineDriver('FRESH SQUEEZE', {
             input.drag(c, BD.x - 30, BD.y, BD.x + 30, BD.y);  // slice
             input.drag(c, BD.x, BD.y, SZ.x, SZ.y);            // load
             input.drag(c, SZ.x, SZ.y, SZ.x, SZ.y + 60);       // press
-            lastBurst = now(); bursts++;
+            lastBurst = now(); bursts++; ctx.acted();
             if (timer) clearTimeout(timer);
             timer = setTimeout(burst, 421);
         };
@@ -94,10 +106,13 @@ defineDriver('TIP CATCH', {
             frame(F) {
                 const c = input.el('hh_fpcv');
                 if (!c || F.has('TIME UP!')) return;
-                const jar = F.img('tc_jar')[0];
-                if (!jar) return;
-                jarX = jar.cx;
                 const dt = F.dt;
+                // The jar is where the game's own lerp puts it: jarX += (jarTX - jarX)·min(1, dt·14).
+                // Read it from the sprite when it is drawn, and keep the model in step so a missing
+                // jar image (artwork still loading) cannot stop the driver.
+                const jar = F.img('tc_jar')[0];
+                if (jar) jarX = jar.cx;
+                else if (lastTX != null) jarX += (lastTX - jarX) * Math.min(1, dt * 14);
                 // track items: match to previous frame by name and proximity
                 const items = [];
                 for (const o of F.imgs) {
@@ -138,7 +153,7 @@ defineDriver('TIP CATCH', {
                     tx = threat ? (threat.x > jarX ? threat.x - 80 : threat.x + 80) : jarX;
                 }
                 tx = clamp(tx, 36, 364);
-                if (lastTX == null || Math.abs(tx - lastTX) > 0.01) { input.move(c, tx, 380, c); lastTX = tx; }
+                if (lastTX == null || Math.abs(tx - lastTX) > 0.01) { input.move(c, tx, 380, c); lastTX = tx; ctx.acted(); }
             }
         };
     }
@@ -159,7 +174,7 @@ defineDriver('FLY SWAT', {
                 if (!F.text(/^x \d+$/, { x: 14, y: 38, d: 4 })) return;      // HUD only in 'play'
                 for (const o of F.imgs) {
                     if (!/^fs_fly[12]$/.test(o.src) || Math.abs(o.w - 34) > 0.6) continue;
-                    input.down(c, o.cx, o.cy, c); shots++;
+                    input.down(c, o.cx, o.cy, c); shots++; ctx.acted();
                 }
             },
             result(m) { ctx.log('flies', m && m.v, 'shots', shots); }
@@ -183,12 +198,20 @@ defineDriver('GLASS STACK', {
                 const lv = F.text(/^(\d+)$/, { x: 200, y: 42, d: 4 });
                 if (!lv || !F.has('STACKED')) { prevX = null; return; }
                 const level = +lv.m[1];
-                const pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src));
+                // Pieces by sprite name; when a piece image is missing the game draws
+                // fillRect(x - w/2, y, w, h) instead, so read those in the same order.
+                let pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src))
+                    .map(o => ({ cx: o.cx, w: Math.min(o.w, o.h) }));
+                if (!pieces.length) {
+                    pieces = F.rects.filter(o => o.w > 12 && o.w <= 205 && o.h > 6 && o.h < 200 && o.y > 100)
+                        .map(o => ({ cx: o.x + o.w / 2, w: o.w }));
+                    if (pieces.length) pieces.shift();      // the tray is drawn first
+                }
                 if (!pieces.length) return;
                 const cur = pieces[pieces.length - 1];
                 const top = pieces.length > 1 ? pieces[pieces.length - 2] : null;
                 const topX = top ? top.cx : 200;
-                const topW = top ? Math.min(top.w, top.h) : 200;
+                const topW = top ? top.w : 200;
                 if (level !== prevLevel) { prevLevel = level; prevX = null; }
                 if (tapLevel === level) { prevX = cur.cx; return; }     // tapped already, waiting for the new piece
                 const bal = F.rects.find(o => Math.abs(o.x - 200) < 0.6 && Math.abs(o.y - 74) < 0.6 && Math.abs(o.h - 8) < 0.6);
@@ -199,9 +222,9 @@ defineDriver('GLASS STACK', {
                 const target = ctx.target.v;
                 if (level >= target) {
                     // slide it off: tap when the overlap is below 30 % of the narrower piece
-                    const w = Math.min(cur.w, cur.h), need = Math.min(w, topW) * 0.30;
+                    const w = cur.w, need = Math.min(w, topW) * 0.30;
                     const over = Math.min(x + w / 2, topX + topW / 2) - Math.max(x - w / 2, topX - topW / 2);
-                    if (over < need - 1) { input.down(c, 200, 240, c); tapLevel = level; ended = true; ctx.log('slid off on purpose at', level); }
+                    if (over < need - 1) { input.down(c, 200, 240, c); ctx.acted(); tapLevel = level; ended = true; ctx.log('slid off on purpose at', level); }
                     prevX = x; return;
                 }
                 if (prevX == null) { prevX = x; return; }
@@ -214,7 +237,7 @@ defineDriver('GLASS STACK', {
                 const dNow = Math.abs(x - want), dNext = Math.abs(nextX - want);
                 const step = amp * sp * F.dt;
                 if (dNow <= dNext && dNow <= step * 0.51 + 0.35) {
-                    input.down(c, 200, 240, c); tapped++; tapLevel = level;
+                    input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level;
                     if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1));
                 }
                 prevX = x;
@@ -259,13 +282,16 @@ defineDriver('TABLE RUSH', {
                     glasses = alive;
                 }
                 // waiter position (hidden on blink frames while invulnerable → integrate our own input)
-                const w = F.img('dg_waiter')[0];
+                // drawSprite() draws an arc of radius w/2 when a sprite is missing:
+                // the waiter is 35 px wide, a guest 30 px.
+                const w = F.img('dg_waiter')[0] || F.arcs.filter(o => Math.abs(o.r - 17.5) < 0.6).map(o => ({ cx: o.x, cy: o.y }))[0];
                 if (w) me = { x: w.cx, y: w.cy };
                 else { me.x = clamp(me.x + act[0] * 118 * dt, 20, 380); me.y = clamp(me.y + act[1] * 118 * dt, 78, 434); if (Math.floor(t / 90) % 2 === 0) invUntil = Math.max(invUntil, t + 1); }
                 // mobs with velocity from the previous frame
                 const mobs = [];
-                for (const o of F.imgs) {
-                    if (!/^dg_cust/.test(o.src)) continue;
+                const drawn = F.imgs.filter(o => /^dg_cust/.test(o.src));
+                const seen = drawn.length ? drawn : F.arcs.filter(o => Math.abs(o.r - 15) < 0.6).map(o => ({ cx: o.x, cy: o.y }));
+                for (const o of seen) {
                     let m = null, bd = 14;
                     for (const p of prevMobs) { if (p.used) continue; const d = hypot(p.x - o.cx, p.y - o.cy); if (d < bd) { bd = d; m = p; } }
                     let vx = 0, vy = 0;
@@ -323,6 +349,7 @@ defineDriver('TABLE RUSH', {
                     if (near) act = [Math.sign(near.x - me.x), Math.sign(near.y - me.y)];
                 }
                 setKeys(act);
+                if (act[0] || act[1]) ctx.acted();
                 lastAct = act;
             },
             stop() { setKeys([0, 0]); },

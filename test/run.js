@@ -31,8 +31,10 @@ test('canvas hooks record absolute coordinates, colours and image names per fram
     const pm = env.window.pineMini;
     const cv = env.el('hh_fpcv', 'canvas');
     const ctx = cv.getContext('2d');
-    const img = { tagName: 'IMG', src: 'https://x/assets/fs_fly1.png?v=3', width: 64, height: 64 };
-    const off = new env.Node('canvas'); off.getContext('2d').drawImage(img, 0, 0);     // keying copy → name inherited
+    const img = { tagName: 'IMG', src: 'https://x/assets/fs_fly1.png?v=3', width: 640, height: 640 };
+    const keyed = new env.Node('canvas'); keyed.getContext('2d').drawImage(img, 0, 0);   // fpKey: key the image
+    const off = new env.Node('canvas'); off.getContext('2d').drawImage(keyed, 0, 0, 260, 260);   // fpKey: downscale canvas→canvas
+    assert.strictEqual(off.__pmSrc, 'fs_fly1', 'sprite name survives the canvas→canvas downscale');
     let got = null;
     pm.hooks.onFrame = f => { got = f; };
     env.frame(1000, t => {

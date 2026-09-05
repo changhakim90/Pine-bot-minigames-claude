@@ -76,7 +76,7 @@ defineDriver('BLIND POUR', {
                 const predNow = ml + tail(), predNext = ml + step + tail();
                 if (Math.abs(predNow - g.target) <= Math.abs(predNext - g.target) || predNow >= g.target) {
                     released = true; relT = F.t; relMl = ml;
-                    input.up(c, 200, 300);
+                    input.up(c, 200, 300); ctx.acted();
                 }
             },
             result(m, txt) {
@@ -166,6 +166,7 @@ defineDriver('STIR STOP', {
                     }
                 }
                 if (target == null) return;
+                ctx.acted();
                 if (phase === 'spin') {
                     if (!s.dragging) { const ev = input.down(c, 310, 272, c); s.dragging = true; lastA = angleOf(c, ev); }
                     // keep ω pinned at 14 with one small move per frame, then decide whether to let go
@@ -181,7 +182,7 @@ defineDriver('STIR STOP', {
                     const dNow = Math.abs(s.temp - target), dNext = Math.abs(next - target);
                     if (dNow <= dNext && Math.abs(s.omega) < 0.5) {
                         served = true;
-                        input.down(input.el('hh_stServe'));
+                        input.down(input.el('hh_stServe')); ctx.acted();
                         ctx.log('served at', s.temp.toFixed(4), 'target', target, 'model mismatches', mism);
                         learn.ema(ctx.name, 'mismatches', mism, 0.3);
                     }
@@ -256,15 +257,21 @@ function clFlight(R, thDeg, dt) {
 }
 function clPowerDecay(p, dt, frames) { for (let i = 0; i < frames; i++) p = Math.max(0, p - p * dt * 0.55 - dt * 0.3); return p; }
 
+// Nothing caps `power`: it is 2.8 per tap, and taps are accepted for the whole run
+// (including while the launch button is held). The distance a run reaches is set by
+// how much power the bot chooses to build, so the target is the strategy — with
+// `pineMini.target('CHAMPAGNE LAUNCH', 20000)` it will build the power for 20,000 m.
+// Very large targets do cost the game work: it draws a 25 m tick on its minimap for
+// every mark, and one particle per tap.
 defineDriver('CHAMPAGNE LAUNCH', {
-    kind: 'unbounded', defaultTarget: 300,
+    kind: 'unbounded', defaultTarget: 2000,
     make(ctx) {
         const m = { worldX: 0, vel: 0, power: 0, angle: 12, hold: false, fired: false, launchX: 0, R: 0, pFire: 0 };
         let run = false, dtAvg = 1 / 60, planned = null;
-        const HOLD_AT = 2200 - 118;   // vel 460 brakes to 0 in 75.6 px; leaves ~40 px before the wall
+        const HOLD_AT = 2200 - 320;   // vel 460 brakes in 75.6 px; the rest is room to keep tapping to 45°
         const plan = () => {
             const k = ctx.cal.flightK || 1;
-            const wantPx = (ctx.target.v + 2) * 40 + 2200 - (HOLD_AT + 75 + 47);   // cork travel needed from launchX
+            const wantPx = (ctx.target.v + 2) * 40 + 2200 - (HOLD_AT + 76 + 47);   // cork travel needed from launchX
             let lo = 20, hi = 1e7;
             for (let i = 0; i < 60; i++) { const mid = Math.sqrt(lo * hi); if (clFlight(mid, 45, dtAvg) * k < wantPx) lo = mid; else hi = mid; }
             const R = hi, pFire = R / (1.6 * 40);     // sin(90°)^2.2 = 1
@@ -274,7 +281,8 @@ defineDriver('CHAMPAGNE LAUNCH', {
         return {
             frame(F) {
                 const bT = input.el('hh_clTap'), bG = input.el('hh_clGo');
-                if (!bT || !bG || m.fired) return;
+                if (!bT || !bG) return;
+                if (m.fired) { ctx.acted(); return; }      // watching our own cork fly is not a stall
                 if (F.dt > 0.004 && F.dt < 0.05) dtAvg += (F.dt - dtAvg) * 0.1;
                 const bar = F.rect(30, 18, 340, 10);
                 if (!bar) return;                  // intro
@@ -289,16 +297,20 @@ defineDriver('CHAMPAGNE LAUNCH', {
                 const prog = F.rects.find(o => Math.abs(o.x - 30) < 0.6 && Math.abs(o.y - 18) < 0.6 && Math.abs(o.h - 10) < 0.6 && o.w < 340 - 1e-6);
                 if (prog) m.worldX = prog.w / 340 * 2200;
                 const pw = F.text(/^PWR (\d+)$/); if (pw && Math.abs(+pw.m[1] - m.power) > 1.5) m.power = +pw.m[1];
+                // top the power up to what the 45° release needs, before AND during the hold —
+                // the game accepts taps throughout the run. While holding, only tap while the
+                // extra speed still leaves room to reach 45° before the wall fires us early.
+                const framesTo45 = Math.max(0, (45 - m.angle) / (62 * dtAvg));
+                const room = 2200 - m.worldX - m.vel * framesTo45 * dtAvg - 40;
+                if (!m.hold || room > 0) {
+                    const need = planned.pHold - m.power;
+                    const taps = Math.min(1200, Math.max(0, Math.ceil(need / 2.8)));
+                    for (let i = 0; i < taps; i++) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
+                    if (taps) ctx.acted();
+                }
                 if (!m.hold) {
-                    if (m.worldX >= HOLD_AT) {
-                        input.down(bG); m.hold = true;
-                    } else {
-                        // tap enough that, were the hold to start now, power at 45° would be pFire
-                        const need = planned.pHold - m.power;
-                        const taps = Math.min(400, Math.max(0, Math.ceil(need / 2.8)));
-                        for (let i = 0; i < taps; i++) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
-                        if (taps === 0 && m.vel < 400) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
-                    }
+                    if (m.worldX >= HOLD_AT) { input.down(bG); m.hold = true; }
+                    else if (m.vel < 400) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
                 } else {
                     // release on the frame nearest 45°
                     const next = Math.min(88, m.angle + dtAvg * 62);
@@ -306,7 +318,7 @@ defineDriver('CHAMPAGNE LAUNCH', {
                         m.fired = true; m.launchX = m.worldX + 47; m.pFire = m.power;
                         const th = m.angle * Math.PI / 180;
                         m.R = Math.max(20, m.power * 1.6 * Math.pow(Math.max(0, Math.sin(2 * th)), 2.2)) * 40;
-                        input.up(bG);
+                        input.up(bG); ctx.acted();
                         ctx.log('fired at', m.angle.toFixed(2) + '°', 'power', m.power.toFixed(1), 'R', m.R.toFixed(0));
                     }
                 }
@@ -347,10 +359,11 @@ defineDriver('SHAKE MASTER', {
                 if (stopped) return;
                 if (!started) {
                     const b = input.el('hh_smStart');
-                    if (b && F.has('PRESS START')) { input.click(b); started = true; ctx.log('start'); }
+                    if (b && F.has('PRESS START')) { input.click(b); started = true; ctx.acted(); ctx.log('start'); }
                     return;
                 }
                 if (!ch && hooks.motion) { ch = new MessageChannel(); ch.port1.onmessage = pump; ch.port2.postMessage(0); }
+                if (calls) ctx.acted();
                 if (F.has('TIME UP!')) { stopped = true; }
             },
             stop() { stopped = true; if (ch) { ch.port1.onmessage = null; ch.port1.close(); ch.port2.close(); } },
@@ -386,7 +399,7 @@ defineDriver('QUICK TAB', {
                 if (!clr || !ok) return;
                 input.down(clr);
                 for (const ch of String(total)) { const b = btn(ch); if (b) input.down(b); }
-                input.down(ok);
+                input.down(ok); ctx.acted();
                 if (round !== answered) { answered = round; if (config.verbose) ctx.log('bill', round, 'total', total); }
             }
         };
@@ -420,11 +433,12 @@ defineDriver('ORDER UP!', {
                 doneRound = round;
                 if (round >= ctx.target.v) {
                     const wrong = (seq[0] + 1) % 10;
-                    const p = OU_BTN(wrong); input.down(c, p.x, p.y, c); failed = true;
+                    const p = OU_BTN(wrong); input.down(c, p.x, p.y, c); ctx.acted(); failed = true;
                     ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')');
                     return;
                 }
                 for (const i of seq) { const p = OU_BTN(i); input.down(c, p.x, p.y, c); }
+                ctx.acted();
             }
         };
     }

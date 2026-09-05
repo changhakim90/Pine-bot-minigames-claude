@@ -10,18 +10,24 @@ const panel = {
         el.id = 'pineMiniPanel';
         el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;background:rgba(10,12,10,.88);color:#e8e6dd;font:11px/1.5 monospace;padding:8px 10px;border:1px solid #3a7d4f;border-radius:6px;max-width:330px;pointer-events:auto;white-space:pre-wrap';
         el.addEventListener('pointerdown', e => e.stopPropagation());
-        el.innerHTML = '<div id="pmTxt"></div><div style="margin-top:6px"><button id="pmToggle">pause</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div>';
+        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div><div style="margin-top:6px"><button id="pmToggle">pause</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div></div>'
+            + '<button id="pmShow" hidden style="all:unset;cursor:pointer;padding:2px 6px;color:#e6b450;font:11px monospace">▸ PineMini</button>';
         d.body.appendChild(el);
         this.el = el;
         el.querySelector('#pmToggle').onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
-        el.querySelector('#pmHide').onclick = () => { el.style.display = 'none'; };
-        // Ctrl+Shift+P shows it again
-        d.addEventListener('keydown', e => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'p') el.style.display = ''; });
+        // hide collapses to a chip that brings it back — never to nothing
+        const body = el.querySelector('#pmBody'), show = el.querySelector('#pmShow');
+        const collapse = (v) => { body.hidden = v; show.hidden = !v; el.style.padding = v ? '2px 4px' : '8px 10px'; };
+        el.querySelector('#pmHide').onclick = () => collapse(true);
+        show.onclick = () => collapse(false);
+        this.collapse = collapse;
+        // Ctrl+Shift+P toggles it too
+        d.addEventListener('keydown', e => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'p') collapse(!body.hidden); });
     },
     render() {
-        if (!this.el) return;
+        if (!this.el || this.el.querySelector('#pmBody').hidden) return;
         const g = flow.game;
         const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (flow.timer ? flow.state : 'PAUSED') + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
@@ -31,6 +37,7 @@ const panel = {
             if (!L.plays && !top) continue;
             lines.push((L.plays ? L.plays + '× ' : '   ') + n.padEnd(17) + (L.best ? L.best.txt : '-').padEnd(16) + (top ? ' #1 ' + top.txt : '') + (beaten(n) ? ' ✓' : ''));
         }
+        if (hooks.dtCapped > 0.3) lines.push('page speed-up: dt ' + (hooks.dtMean * 1000).toFixed(0) + 'ms (' + Math.round(hooks.dtCapped * 100) + '% at the engines\' 50ms cap)');
         if (flow.err) lines.push('err: ' + flow.err);
         const txt = lines.join('\n');
         if (txt !== this.last) { this.last = txt; this.el.querySelector('#pmTxt').textContent = txt; }
@@ -52,6 +59,18 @@ const api = {
     results() { return flow.results.slice(); },
     best() { const o = {}; for (const n of GAME_NAMES) { const L = learn.game(n); o[n] = { best: L.best && L.best.txt, plays: L.plays, board: board.top[n] && board.top[n].txt, target: targetFor(n), beaten: beaten(n) }; } return o; },
     reset(name) { learn.reset(name); flow.results = []; store.del('results'); return 'reset'; },
+    // per-game target for the unbounded games (Champagne metres, Order Up / Where Is My Shot
+    // rounds, Ice Carving balls, Glass Stack height, Table Rush stages). null clears it.
+    target(name, v) {
+        name = String(name || '').toUpperCase();
+        if (!drivers[name]) return 'unknown game: ' + name;
+        const t = Object.assign({}, config.targets);
+        if (v == null) delete t[name]; else t[name] = v;
+        api.set('targets', t);
+        return name + ' → ' + JSON.stringify(targetFor(name));
+    },
+    // how fast the page's clock is running compared with the engines' own frame budget
+    speed() { return { dtMs: +(hooks.dtMean * 1000).toFixed(2), cappedFrames: +(hooks.dtCapped * 100).toFixed(0) + '%', frames: hooks.frames, note: hooks.dtCapped > 0.5 ? 'accelerated: the engines clamp dt to 50ms, so the sim advances in coarse steps' : 'normal' }; },
     frame: null,     // the most recent frame (debugging)
     rankMetric, targetFor, beaten, wantsPlay, tune, pourTailModel, pourMlFromSurface, FP_GLASS, stStep, stBottom, stTempColor, stTempRGB, clFlight, clPowerDecay, OU_BTN, Frame, publishFrame
 };

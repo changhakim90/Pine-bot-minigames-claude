@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pine & Co Minigame Bot
 // @namespace    https://pineandco.online/
-// @version      0.2.1
+// @version      0.3.0
 // @description  Autonomous record-chasing player for the Pine & Co "Bartender's Happy Hour" mini games. Watches the game's own canvas draw calls, drives every game with frame-exact synthetic input, plays the whole set on its own, tunes itself from its results and never submits a name to the leaderboard.
 // @author       you
 // @match        https://pineandco.online/*
@@ -42,7 +42,7 @@
  * ===================================================================== */
 (function () {
 'use strict';
-const SCRIPT_VERSION = '0.2.1';
+const SCRIPT_VERSION = '0.3.0';
 const TAG = '[PineMini]';
 const NS = 'pineMini_';
 const W = (typeof window !== 'undefined') ? window : globalThis;
@@ -68,7 +68,10 @@ const DEFAULT_CONFIG = {
     games: GAME_NAMES,      // queue; order is followed on the first pass
     loop: true,             // keep replaying unbeaten / improvable games after the first pass
     stopWhenBeaten: false,  // stop once every game beats the board's #1 (else keep improving)
-    howtoWaitMs: 1400,      // let the game warm its assets on the HOW TO PLAY screen
+    howtoWaitMs: 1200,      // minimum time on the HOW TO PLAY screen
+    howtoMaxMs: 30000,      // ...and the longest to wait there for the game's artwork
+    stallFrames: 3600,      // frames a driver may go without acting before the round is abandoned (~1 min)
+    targets: {},            // per-game target override, e.g. {'ORDER UP!': 60}
     resultWaitMs: 900,      // read the result screen this long before pressing OK
     margin: 0.10,           // unbounded games aim this far above the board's #1 (fraction)
     minMargin: 2,           // ...and at least this many units above it
@@ -92,7 +95,9 @@ const hooks = {
     cur: null,          // ops being recorded for the callback running now
     onFrame: null,      // function(frame)
     motion: null,       // the game's devicemotion listener (Shake Master)
-    listeners: []       // {type, fn, target}
+    listeners: [],      // {type, fn, target}
+    dtMean: 1 / 60,     // rolling mean of the dt the engines compute
+    dtCapped: 0         // fraction of frames at the engines' 0.05 cap (page-speed extensions pin it there)
 };
 
 function imgName(src) {
@@ -124,9 +129,16 @@ function installHooks() {
                         const cur = hooks.cur;
                         if (cur) { try { rec.call(this, cur, arguments); } catch (e) { } }
                     } else if (name === 'drawImage' && !cv.id && !cv.__pmSrc) {
-                        // offscreen keying canvases (fpKey) inherit the name of the image copied into them
+                        // Offscreen keying canvases inherit the name of what is copied into them.
+                        // fpKey() draws the <img> into one canvas, then — whenever the image is
+                        // wider than the game's maxW — copies THAT canvas into a smaller one, so
+                        // the name has to survive canvas→canvas draws too or every keyed sprite
+                        // (ws_cover, fs_fly1, ou_ck3, tc_jar…) reaches us nameless.
                         const im = arguments[0];
-                        if (im && im.tagName === 'IMG') cv.__pmSrc = imgName(im);
+                        if (im) {
+                            if (im.tagName === 'IMG') cv.__pmSrc = imgName(im);
+                            else if (im.__pmSrc) cv.__pmSrc = im.__pmSrc;
+                        }
                     }
                 }
                 return nat.apply(this, arguments);
@@ -246,6 +258,10 @@ function publishFrame(t, ops) {
     // ops of one rAF callback; the canvas id comes from the DOM element the ops were drawn on
     const f = new Frame(t, ops);
     hooks.frames++;
+    if (f.dt > 0.0005) {
+        hooks.dtMean += (f.dt - hooks.dtMean) * 0.02;
+        hooks.dtCapped += ((f.dt >= 0.0499 ? 1 : 0) - hooks.dtCapped) * 0.02;
+    }
     f.id = currentGameCanvasId();
     const cb = hooks.onFrame;
     if (cb) { try { cb(f); } catch (e) { warn('frame handler', e); } }
@@ -445,6 +461,47 @@ const board = {
 };
 board.load();
 
+// ---------------------------------------------------------------- assets
+// The game downloads a mini game's artwork only when its card is picked, while
+// the HOW TO PLAY panel is up. A driver that reads sprites therefore has to
+// start AFTER they exist — the more so with a page-speed extension, where the
+// bot's own waits are compressed but the network is not. These are the files
+// each game's loader asks for (from the game's source); the bot warms the very
+// same URLs and starts the round once they have settled.
+const ASSETS = {
+    'BLIND POUR': ['fp_bg', 'fp_bottle', 'fp_logo', 'fp_shot', 'fp_jigger', 'fp_rocks'],
+    'STIR STOP': ['st_glass', 'st_ice1', 'st_ice2', 'st_top', 'st_spoon', 'st_logo'],
+    'ICE CARVING': ['ic_ice', 'ic_pick', 'ic_broke', 'ic_logo'],
+    'CHAMPAGNE LAUNCH': ['cl_run1', 'cl_run2', 'cl_run3', 'cl_run4', 'cl_run5', 'cl_skid', 'cl_cork', 'cl_logo'],
+    'SHAKE MASTER': ['sm_ice1', 'sm_ice2', 'sm_ice3', 'sm_cap1', 'sm_cap2', 'sm_closed', 'sm_logo'],
+    'QUICK TAB': ['qt_receipt', 'qt_logo', 'qt_cust1', 'qt_cust2', 'qt_cust3', 'qt_cust4', 'qt_cust5', 'qt_cust6', 'qt_cust7'],
+    'ORDER UP!': ['ou_pos', 'ou_logo'].concat(Array.from({ length: 10 }, (_, i) => 'ou_ck' + i), Array.from({ length: 8 }, (_, i) => 'ou_cu' + (i + 1))),
+    'WHERE IS MY SHOT?': ['ws_cover', 'ws_shot', 'ws_logo'],
+    'FRESH SQUEEZE': ['sq_basket', 'sq_board', 'sq_closed', 'sq_cup', 'sq_half', 'sq_lime', 'sq_logo', 'sq_open', 'sq_spent', 'sq_trash'],
+    'TIP CATCH': ['tc_jar', 'tc_receipt', 'tc_env', 'tc_cap', 'tc_logo', 'bill_10000', 'bill_50000', 'coin_gold', 'bottle_whiskey', 'bottle_gin', 'bottle_rum'],
+    'FLY SWAT': ['fs_logo', 'fs_bigfly', 'fs_fly1', 'fs_fly2', 'fs_basket', 'fs_basket2', 'fs_basket3'],
+    'GLASS STACK': ['gs_tray', 'gs_hand', 'gs_logo', 'gs_plate1', 'gs_plate1b', 'gs_plate1c', 'gs_plate2', 'gs_plate2b', 'gs_plate2c', 'gs_wine', 'gs_wineb', 'gs_coupe', 'gs_coupeb', 'gs_shot', 'gs_shotb', 'gs_rocks', 'gs_highball', 'gs_martini', 'gs_pick'],
+    'TABLE RUSH': ['dg_waiter', 'dg_cust1', 'dg_cust2', 'dg_cust3', 'dg_cust4', 'dg_cust5', 'dg_cust6', 'dg_floor', 'dg_bar', 'dg_table', 'dg_glass1', 'dg_glass2', 'dg_glass3', 'dg_logo']
+};
+const preload = {
+    game: null, total: 0, done: 0, started: 0, imgs: [],
+    start(name) {
+        this.game = name; this.done = 0; this.imgs = []; this.started = now();
+        const list = ASSETS[name] || [];
+        this.total = list.length;
+        for (const k of list) {
+            const im = new Image();
+            const settle = () => { this.done++; };
+            im.onload = settle; im.onerror = settle;
+            im.src = 'assets/' + k + '.png';
+            this.imgs.push(im);
+        }
+    },
+    // ready when every request has settled (loaded or 404'd) — a real network event,
+    // so a page-speed extension cannot fast-forward past it
+    ready() { return !this.total || this.done >= this.total; }
+};
+
 // ---------------------------------------------------------------- drivers registry
 // A driver spec: { kind:'unbounded'|'capped'|'precision', floor, defaultTarget, tunables,
 //                  make(game) → { frame(F), tick(), stop(), result(m) } }
@@ -458,7 +515,9 @@ function targetFor(name) {
     const g = learn.game(name);
     if (spec.kind === 'precision') return { v: spec.floor == null ? 0 : spec.floor, low: true, why: 'floor' };
     if (spec.kind === 'unbounded') {
-        let v = (config.e2eTargets && config.e2eTargets[name]) || spec.defaultTarget || 10;
+        const forced = (config.targets && config.targets[name]) || (config.e2eTargets && config.e2eTargets[name]);
+        if (forced) return { v: forced, low: false, why: 'set' };
+        let v = spec.defaultTarget || 10;
         if (top && !top.low) v = Math.ceil(Math.max(top.v * (1 + config.margin), top.v + config.minMargin));
         if (g.best && !g.best.low && g.best.v >= v && top && g.best.v > top.v) v = g.best.v;    // already there: hold
         return { v, low: false, why: top ? 'board' : 'default' };
@@ -559,6 +618,7 @@ const flow = {
                     const card = [...d.querySelectorAll('#hh_sbwrap2 .gcard')].find(c => { const n = c.querySelector('.gname'); return n && n.textContent.trim() === name; });
                     if (!card) { warn('no card for', name); this.since = now(); break; }
                     this.beginGame(name);
+                    preload.start(name);
                     input.click(card);
                     this.set('howto');
                     break;
@@ -566,8 +626,14 @@ const flow = {
                 case 'howto': {
                     const ht = input.el('hh_howto');
                     if (ht && !ht.classList.contains('hidden')) {
-                        if (this.age() >= config.howtoWaitMs) { hooks.lastT = 0; input.down(ht); this.set('game'); }
-                    } else if (this.age() > 8000) { warn('how-to screen never came'); this.endGame(); this.set('hub'); }
+                        // start only once the artwork has arrived: the drivers read sprites, and
+                        // the game itself draws crude fallbacks (rects/discs) until the art lands
+                        const waited = this.age() >= config.howtoWaitMs;
+                        if (waited && (preload.ready() || this.age() >= config.howtoMaxMs)) {
+                            if (!preload.ready()) warn('starting with ' + (preload.total - preload.done) + '/' + preload.total + ' assets still loading');
+                            hooks.lastT = 0; input.down(ht); this.set('game');
+                        }
+                    } else if (this.age() > 30000) { warn('how-to screen never came'); this.endGame(); this.set('hub'); }
                     break;
                 }
                 case 'game': {
@@ -575,7 +641,13 @@ const flow = {
                     if (rr && !rr.classList.contains('hidden')) { this.set('result'); break; }
                     if (this.game && this.game.driver && this.game.driver.tick) this.game.driver.tick();
                     if (!input.visible(input.el('hh_game')) && this.age() > 3000) { warn('game screen gone'); this.endGame(); this.set('hub'); }
-                    if (this.age() > 20 * 60000) { warn('game timeout'); this.endGame(); this.set('hub'); }
+                    // Where Is My Shot, Glass Stack, Order Up and Table Rush have no clock: they
+                    // wait for input forever. If a driver has gone this many frames without acting,
+                    // it is stuck (missing artwork, an unexpected screen) — leave rather than hang.
+                    if (this.game && this.game.frames - this.game.actedAt > config.stallFrames) {
+                        warn(this.game.name + ': no action for ' + config.stallFrames + ' frames — leaving the round');
+                        this.leaveGame();
+                    }
                     break;
                 }
                 case 'result': {
@@ -596,8 +668,9 @@ const flow = {
         const spec = drivers[name];
         const params = spec.tunables ? tune.pick(name, spec.tunables) : {};
         const g = learn.game(name);
-        const ctx = { name, params, cal: g.cal, learn: g, target: targetFor(name), board: board.top[name] || null, frames: 0, t0: 0, log: (...a) => log(name + ':', ...a) };
-        this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0 };
+        const ctx = { name, params, cal: g.cal, learn: g, target: targetFor(name), board: board.top[name] || null, frames: 0, t0: 0, acted: () => { }, log: (...a) => log(name + ':', ...a) };
+        ctx.acted = () => { if (this.game) this.game.actedAt = this.game.frames; };
+        this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0, actedAt: 0 };
         log('playing', name, 'target', ctx.target.v, '(' + ctx.target.why + ')', 'params', JSON.stringify(params));
     },
     frame(f) {
@@ -616,7 +689,7 @@ const flow = {
         if (g.driver.result) safe(() => g.driver.result(m, txt));
         const spec = drivers[g.name];
         if (spec.tunables && m) tune.report(g.name, g.params, m.low ? -m.v : m.v);
-        const rec = { name: g.name, txt, v: m ? m.v : null, at: Date.now(), best: nb, frames: g.frames, ms: Math.round(now() - g.t0) };
+        const rec = { name: g.name, txt, v: m ? m.v : null, at: Date.now(), best: nb, frames: g.frames, ms: Math.round(now() - g.t0), dt: +hooks.dtMean.toFixed(4), fast: hooks.dtCapped > 0.5 };
         this.results.push(rec);
         if (this.results.length > 300) this.results.splice(0, this.results.length - 300);
         store.set('results', this.results);
@@ -624,6 +697,13 @@ const flow = {
         const top = board.top[g.name];
         log('result', g.name, '→', txt, nb ? '(new best)' : '', top ? ('board #1: ' + top.txt) : '');
         this.endGame();
+    },
+    // give up on a round that cannot be played (nothing to click) and go back to the hub
+    leaveGame() {
+        this.endGame();
+        const bb = input.el('hh_backBtn');
+        if (bb && !bb.classList.contains('hidden')) input.click(bb);
+        this.set('hub');
     },
     endGame() {
         const g = this.game;
@@ -710,7 +790,7 @@ defineDriver('BLIND POUR', {
                 const predNow = ml + tail(), predNext = ml + step + tail();
                 if (Math.abs(predNow - g.target) <= Math.abs(predNext - g.target) || predNow >= g.target) {
                     released = true; relT = F.t; relMl = ml;
-                    input.up(c, 200, 300);
+                    input.up(c, 200, 300); ctx.acted();
                 }
             },
             result(m, txt) {
@@ -800,6 +880,7 @@ defineDriver('STIR STOP', {
                     }
                 }
                 if (target == null) return;
+                ctx.acted();
                 if (phase === 'spin') {
                     if (!s.dragging) { const ev = input.down(c, 310, 272, c); s.dragging = true; lastA = angleOf(c, ev); }
                     // keep ω pinned at 14 with one small move per frame, then decide whether to let go
@@ -815,7 +896,7 @@ defineDriver('STIR STOP', {
                     const dNow = Math.abs(s.temp - target), dNext = Math.abs(next - target);
                     if (dNow <= dNext && Math.abs(s.omega) < 0.5) {
                         served = true;
-                        input.down(input.el('hh_stServe'));
+                        input.down(input.el('hh_stServe')); ctx.acted();
                         ctx.log('served at', s.temp.toFixed(4), 'target', target, 'model mismatches', mism);
                         learn.ema(ctx.name, 'mismatches', mism, 0.3);
                     }
@@ -890,15 +971,21 @@ function clFlight(R, thDeg, dt) {
 }
 function clPowerDecay(p, dt, frames) { for (let i = 0; i < frames; i++) p = Math.max(0, p - p * dt * 0.55 - dt * 0.3); return p; }
 
+// Nothing caps `power`: it is 2.8 per tap, and taps are accepted for the whole run
+// (including while the launch button is held). The distance a run reaches is set by
+// how much power the bot chooses to build, so the target is the strategy — with
+// `pineMini.target('CHAMPAGNE LAUNCH', 20000)` it will build the power for 20,000 m.
+// Very large targets do cost the game work: it draws a 25 m tick on its minimap for
+// every mark, and one particle per tap.
 defineDriver('CHAMPAGNE LAUNCH', {
-    kind: 'unbounded', defaultTarget: 300,
+    kind: 'unbounded', defaultTarget: 2000,
     make(ctx) {
         const m = { worldX: 0, vel: 0, power: 0, angle: 12, hold: false, fired: false, launchX: 0, R: 0, pFire: 0 };
         let run = false, dtAvg = 1 / 60, planned = null;
-        const HOLD_AT = 2200 - 118;   // vel 460 brakes to 0 in 75.6 px; leaves ~40 px before the wall
+        const HOLD_AT = 2200 - 320;   // vel 460 brakes in 75.6 px; the rest is room to keep tapping to 45°
         const plan = () => {
             const k = ctx.cal.flightK || 1;
-            const wantPx = (ctx.target.v + 2) * 40 + 2200 - (HOLD_AT + 75 + 47);   // cork travel needed from launchX
+            const wantPx = (ctx.target.v + 2) * 40 + 2200 - (HOLD_AT + 76 + 47);   // cork travel needed from launchX
             let lo = 20, hi = 1e7;
             for (let i = 0; i < 60; i++) { const mid = Math.sqrt(lo * hi); if (clFlight(mid, 45, dtAvg) * k < wantPx) lo = mid; else hi = mid; }
             const R = hi, pFire = R / (1.6 * 40);     // sin(90°)^2.2 = 1
@@ -908,7 +995,8 @@ defineDriver('CHAMPAGNE LAUNCH', {
         return {
             frame(F) {
                 const bT = input.el('hh_clTap'), bG = input.el('hh_clGo');
-                if (!bT || !bG || m.fired) return;
+                if (!bT || !bG) return;
+                if (m.fired) { ctx.acted(); return; }      // watching our own cork fly is not a stall
                 if (F.dt > 0.004 && F.dt < 0.05) dtAvg += (F.dt - dtAvg) * 0.1;
                 const bar = F.rect(30, 18, 340, 10);
                 if (!bar) return;                  // intro
@@ -923,16 +1011,20 @@ defineDriver('CHAMPAGNE LAUNCH', {
                 const prog = F.rects.find(o => Math.abs(o.x - 30) < 0.6 && Math.abs(o.y - 18) < 0.6 && Math.abs(o.h - 10) < 0.6 && o.w < 340 - 1e-6);
                 if (prog) m.worldX = prog.w / 340 * 2200;
                 const pw = F.text(/^PWR (\d+)$/); if (pw && Math.abs(+pw.m[1] - m.power) > 1.5) m.power = +pw.m[1];
+                // top the power up to what the 45° release needs, before AND during the hold —
+                // the game accepts taps throughout the run. While holding, only tap while the
+                // extra speed still leaves room to reach 45° before the wall fires us early.
+                const framesTo45 = Math.max(0, (45 - m.angle) / (62 * dtAvg));
+                const room = 2200 - m.worldX - m.vel * framesTo45 * dtAvg - 40;
+                if (!m.hold || room > 0) {
+                    const need = planned.pHold - m.power;
+                    const taps = Math.min(1200, Math.max(0, Math.ceil(need / 2.8)));
+                    for (let i = 0; i < taps; i++) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
+                    if (taps) ctx.acted();
+                }
                 if (!m.hold) {
-                    if (m.worldX >= HOLD_AT) {
-                        input.down(bG); m.hold = true;
-                    } else {
-                        // tap enough that, were the hold to start now, power at 45° would be pFire
-                        const need = planned.pHold - m.power;
-                        const taps = Math.min(400, Math.max(0, Math.ceil(need / 2.8)));
-                        for (let i = 0; i < taps; i++) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
-                        if (taps === 0 && m.vel < 400) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
-                    }
+                    if (m.worldX >= HOLD_AT) { input.down(bG); m.hold = true; }
+                    else if (m.vel < 400) { input.down(bT); m.power += 2.8; m.vel = Math.min(460, m.vel + 62); }
                 } else {
                     // release on the frame nearest 45°
                     const next = Math.min(88, m.angle + dtAvg * 62);
@@ -940,7 +1032,7 @@ defineDriver('CHAMPAGNE LAUNCH', {
                         m.fired = true; m.launchX = m.worldX + 47; m.pFire = m.power;
                         const th = m.angle * Math.PI / 180;
                         m.R = Math.max(20, m.power * 1.6 * Math.pow(Math.max(0, Math.sin(2 * th)), 2.2)) * 40;
-                        input.up(bG);
+                        input.up(bG); ctx.acted();
                         ctx.log('fired at', m.angle.toFixed(2) + '°', 'power', m.power.toFixed(1), 'R', m.R.toFixed(0));
                     }
                 }
@@ -981,10 +1073,11 @@ defineDriver('SHAKE MASTER', {
                 if (stopped) return;
                 if (!started) {
                     const b = input.el('hh_smStart');
-                    if (b && F.has('PRESS START')) { input.click(b); started = true; ctx.log('start'); }
+                    if (b && F.has('PRESS START')) { input.click(b); started = true; ctx.acted(); ctx.log('start'); }
                     return;
                 }
                 if (!ch && hooks.motion) { ch = new MessageChannel(); ch.port1.onmessage = pump; ch.port2.postMessage(0); }
+                if (calls) ctx.acted();
                 if (F.has('TIME UP!')) { stopped = true; }
             },
             stop() { stopped = true; if (ch) { ch.port1.onmessage = null; ch.port1.close(); ch.port2.close(); } },
@@ -1020,7 +1113,7 @@ defineDriver('QUICK TAB', {
                 if (!clr || !ok) return;
                 input.down(clr);
                 for (const ch of String(total)) { const b = btn(ch); if (b) input.down(b); }
-                input.down(ok);
+                input.down(ok); ctx.acted();
                 if (round !== answered) { answered = round; if (config.verbose) ctx.log('bill', round, 'total', total); }
             }
         };
@@ -1054,11 +1147,12 @@ defineDriver('ORDER UP!', {
                 doneRound = round;
                 if (round >= ctx.target.v) {
                     const wrong = (seq[0] + 1) % 10;
-                    const p = OU_BTN(wrong); input.down(c, p.x, p.y, c); failed = true;
+                    const p = OU_BTN(wrong); input.down(c, p.x, p.y, c); ctx.acted(); failed = true;
                     ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')');
                     return;
                 }
                 for (const i of seq) { const p = OU_BTN(i); input.down(c, p.x, p.y, c); }
+                ctx.acted();
             }
         };
     }
@@ -1086,20 +1180,32 @@ defineDriver('WHERE IS MY SHOT?', {
                 const rt = F.text(/^ROUND (\d+)$/, { x: 12, y: 28, d: 4 });
                 if (!rt) return;
                 if (+rt.m[1] !== round) { round = +rt.m[1]; shotIdx = -1; picked = 0; }
-                const covers = F.img('ws_cover');
-                const shot = F.img('ws_shot')[0];
+                // Covers by sprite name; if the artwork is unnamed for any reason, fall back to
+                // the shadow ellipses the game draws once per cover (ry 8) and under the shot (ry 7).
+                let covers = F.img('ws_cover');
+                let shot = F.img('ws_shot')[0];
+                if (!covers.length) covers = F.ellipses.filter(o => Math.abs(o.y - 332) < 1 && Math.abs(o.ry - 8) < 0.6).map(o => ({ cx: o.x }));
+                if (!shot) { const e = F.ellipses.find(o => Math.abs(o.y - 330) < 1 && Math.abs(o.ry - 7) < 0.6); if (e) shot = { cx: e.x }; }
                 if (shot && covers.length && (F.has('WATCH THE SHOT!') || F.has('FIND IT!'))) {
                     let best = -1, bd = 1e9;
                     covers.forEach((o, i) => { const d = Math.abs(o.cx - shot.cx); if (d < bd) { bd = d; best = i; } });
                     if (bd < 3) shotIdx = best;
                 }
                 if (!F.has('WHERE IS IT? TAP!') || picked === round) return;
-                if (!covers.length) return;
+                if (!covers.length) {
+                    // nothing recognisable was drawn (artwork still loading): the cup positions are
+                    // pure geometry — cupX(slot, n) with n = min(5, 1 + round) — so tap anyway
+                    // rather than sit in a round that never ends
+                    const n = Math.min(5, 1 + round), sp = Math.min(96, 340 / Math.max(1, n - 1));
+                    covers = Array.from({ length: n }, (_, i) => ({ cx: 200 + (i - (n - 1) / 2) * sp }));
+                    ctx.log('covers not drawn — tapping by geometry');
+                }
                 picked = round;
                 let idx = shotIdx >= 0 ? shotIdx : 0;
                 if (round >= ctx.target.v) { idx = (idx + 1) % covers.length; failed = true; ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')'); }
                 else if (shotIdx < 0) ctx.log('lost the shot this round — guessing');
                 input.down(c, covers[idx].cx, 288, c);
+                ctx.acted();
             }
         };
     }
@@ -1126,7 +1232,7 @@ defineDriver('FRESH SQUEEZE', {
             input.drag(c, BD.x - 30, BD.y, BD.x + 30, BD.y);  // slice
             input.drag(c, BD.x, BD.y, SZ.x, SZ.y);            // load
             input.drag(c, SZ.x, SZ.y, SZ.x, SZ.y + 60);       // press
-            lastBurst = now(); bursts++;
+            lastBurst = now(); bursts++; ctx.acted();
             if (timer) clearTimeout(timer);
             timer = setTimeout(burst, 421);
         };
@@ -1160,10 +1266,13 @@ defineDriver('TIP CATCH', {
             frame(F) {
                 const c = input.el('hh_fpcv');
                 if (!c || F.has('TIME UP!')) return;
-                const jar = F.img('tc_jar')[0];
-                if (!jar) return;
-                jarX = jar.cx;
                 const dt = F.dt;
+                // The jar is where the game's own lerp puts it: jarX += (jarTX - jarX)·min(1, dt·14).
+                // Read it from the sprite when it is drawn, and keep the model in step so a missing
+                // jar image (artwork still loading) cannot stop the driver.
+                const jar = F.img('tc_jar')[0];
+                if (jar) jarX = jar.cx;
+                else if (lastTX != null) jarX += (lastTX - jarX) * Math.min(1, dt * 14);
                 // track items: match to previous frame by name and proximity
                 const items = [];
                 for (const o of F.imgs) {
@@ -1204,7 +1313,7 @@ defineDriver('TIP CATCH', {
                     tx = threat ? (threat.x > jarX ? threat.x - 80 : threat.x + 80) : jarX;
                 }
                 tx = clamp(tx, 36, 364);
-                if (lastTX == null || Math.abs(tx - lastTX) > 0.01) { input.move(c, tx, 380, c); lastTX = tx; }
+                if (lastTX == null || Math.abs(tx - lastTX) > 0.01) { input.move(c, tx, 380, c); lastTX = tx; ctx.acted(); }
             }
         };
     }
@@ -1225,7 +1334,7 @@ defineDriver('FLY SWAT', {
                 if (!F.text(/^x \d+$/, { x: 14, y: 38, d: 4 })) return;      // HUD only in 'play'
                 for (const o of F.imgs) {
                     if (!/^fs_fly[12]$/.test(o.src) || Math.abs(o.w - 34) > 0.6) continue;
-                    input.down(c, o.cx, o.cy, c); shots++;
+                    input.down(c, o.cx, o.cy, c); shots++; ctx.acted();
                 }
             },
             result(m) { ctx.log('flies', m && m.v, 'shots', shots); }
@@ -1249,12 +1358,20 @@ defineDriver('GLASS STACK', {
                 const lv = F.text(/^(\d+)$/, { x: 200, y: 42, d: 4 });
                 if (!lv || !F.has('STACKED')) { prevX = null; return; }
                 const level = +lv.m[1];
-                const pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src));
+                // Pieces by sprite name; when a piece image is missing the game draws
+                // fillRect(x - w/2, y, w, h) instead, so read those in the same order.
+                let pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src))
+                    .map(o => ({ cx: o.cx, w: Math.min(o.w, o.h) }));
+                if (!pieces.length) {
+                    pieces = F.rects.filter(o => o.w > 12 && o.w <= 205 && o.h > 6 && o.h < 200 && o.y > 100)
+                        .map(o => ({ cx: o.x + o.w / 2, w: o.w }));
+                    if (pieces.length) pieces.shift();      // the tray is drawn first
+                }
                 if (!pieces.length) return;
                 const cur = pieces[pieces.length - 1];
                 const top = pieces.length > 1 ? pieces[pieces.length - 2] : null;
                 const topX = top ? top.cx : 200;
-                const topW = top ? Math.min(top.w, top.h) : 200;
+                const topW = top ? top.w : 200;
                 if (level !== prevLevel) { prevLevel = level; prevX = null; }
                 if (tapLevel === level) { prevX = cur.cx; return; }     // tapped already, waiting for the new piece
                 const bal = F.rects.find(o => Math.abs(o.x - 200) < 0.6 && Math.abs(o.y - 74) < 0.6 && Math.abs(o.h - 8) < 0.6);
@@ -1265,9 +1382,9 @@ defineDriver('GLASS STACK', {
                 const target = ctx.target.v;
                 if (level >= target) {
                     // slide it off: tap when the overlap is below 30 % of the narrower piece
-                    const w = Math.min(cur.w, cur.h), need = Math.min(w, topW) * 0.30;
+                    const w = cur.w, need = Math.min(w, topW) * 0.30;
                     const over = Math.min(x + w / 2, topX + topW / 2) - Math.max(x - w / 2, topX - topW / 2);
-                    if (over < need - 1) { input.down(c, 200, 240, c); tapLevel = level; ended = true; ctx.log('slid off on purpose at', level); }
+                    if (over < need - 1) { input.down(c, 200, 240, c); ctx.acted(); tapLevel = level; ended = true; ctx.log('slid off on purpose at', level); }
                     prevX = x; return;
                 }
                 if (prevX == null) { prevX = x; return; }
@@ -1280,7 +1397,7 @@ defineDriver('GLASS STACK', {
                 const dNow = Math.abs(x - want), dNext = Math.abs(nextX - want);
                 const step = amp * sp * F.dt;
                 if (dNow <= dNext && dNow <= step * 0.51 + 0.35) {
-                    input.down(c, 200, 240, c); tapped++; tapLevel = level;
+                    input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level;
                     if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1));
                 }
                 prevX = x;
@@ -1325,13 +1442,16 @@ defineDriver('TABLE RUSH', {
                     glasses = alive;
                 }
                 // waiter position (hidden on blink frames while invulnerable → integrate our own input)
-                const w = F.img('dg_waiter')[0];
+                // drawSprite() draws an arc of radius w/2 when a sprite is missing:
+                // the waiter is 35 px wide, a guest 30 px.
+                const w = F.img('dg_waiter')[0] || F.arcs.filter(o => Math.abs(o.r - 17.5) < 0.6).map(o => ({ cx: o.x, cy: o.y }))[0];
                 if (w) me = { x: w.cx, y: w.cy };
                 else { me.x = clamp(me.x + act[0] * 118 * dt, 20, 380); me.y = clamp(me.y + act[1] * 118 * dt, 78, 434); if (Math.floor(t / 90) % 2 === 0) invUntil = Math.max(invUntil, t + 1); }
                 // mobs with velocity from the previous frame
                 const mobs = [];
-                for (const o of F.imgs) {
-                    if (!/^dg_cust/.test(o.src)) continue;
+                const drawn = F.imgs.filter(o => /^dg_cust/.test(o.src));
+                const seen = drawn.length ? drawn : F.arcs.filter(o => Math.abs(o.r - 15) < 0.6).map(o => ({ cx: o.x, cy: o.y }));
+                for (const o of seen) {
                     let m = null, bd = 14;
                     for (const p of prevMobs) { if (p.used) continue; const d = hypot(p.x - o.cx, p.y - o.cy); if (d < bd) { bd = d; m = p; } }
                     let vx = 0, vy = 0;
@@ -1389,6 +1509,7 @@ defineDriver('TABLE RUSH', {
                     if (near) act = [Math.sign(near.x - me.x), Math.sign(near.y - me.y)];
                 }
                 setKeys(act);
+                if (act[0] || act[1]) ctx.acted();
                 lastAct = act;
             },
             stop() { setKeys([0, 0]); },
@@ -1409,18 +1530,24 @@ const panel = {
         el.id = 'pineMiniPanel';
         el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;background:rgba(10,12,10,.88);color:#e8e6dd;font:11px/1.5 monospace;padding:8px 10px;border:1px solid #3a7d4f;border-radius:6px;max-width:330px;pointer-events:auto;white-space:pre-wrap';
         el.addEventListener('pointerdown', e => e.stopPropagation());
-        el.innerHTML = '<div id="pmTxt"></div><div style="margin-top:6px"><button id="pmToggle">pause</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div>';
+        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div><div style="margin-top:6px"><button id="pmToggle">pause</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div></div>'
+            + '<button id="pmShow" hidden style="all:unset;cursor:pointer;padding:2px 6px;color:#e6b450;font:11px monospace">▸ PineMini</button>';
         d.body.appendChild(el);
         this.el = el;
         el.querySelector('#pmToggle').onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
-        el.querySelector('#pmHide').onclick = () => { el.style.display = 'none'; };
-        // Ctrl+Shift+P shows it again
-        d.addEventListener('keydown', e => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'p') el.style.display = ''; });
+        // hide collapses to a chip that brings it back — never to nothing
+        const body = el.querySelector('#pmBody'), show = el.querySelector('#pmShow');
+        const collapse = (v) => { body.hidden = v; show.hidden = !v; el.style.padding = v ? '2px 4px' : '8px 10px'; };
+        el.querySelector('#pmHide').onclick = () => collapse(true);
+        show.onclick = () => collapse(false);
+        this.collapse = collapse;
+        // Ctrl+Shift+P toggles it too
+        d.addEventListener('keydown', e => { if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'p') collapse(!body.hidden); });
     },
     render() {
-        if (!this.el) return;
+        if (!this.el || this.el.querySelector('#pmBody').hidden) return;
         const g = flow.game;
         const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (flow.timer ? flow.state : 'PAUSED') + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
@@ -1430,6 +1557,7 @@ const panel = {
             if (!L.plays && !top) continue;
             lines.push((L.plays ? L.plays + '× ' : '   ') + n.padEnd(17) + (L.best ? L.best.txt : '-').padEnd(16) + (top ? ' #1 ' + top.txt : '') + (beaten(n) ? ' ✓' : ''));
         }
+        if (hooks.dtCapped > 0.3) lines.push('page speed-up: dt ' + (hooks.dtMean * 1000).toFixed(0) + 'ms (' + Math.round(hooks.dtCapped * 100) + '% at the engines\' 50ms cap)');
         if (flow.err) lines.push('err: ' + flow.err);
         const txt = lines.join('\n');
         if (txt !== this.last) { this.last = txt; this.el.querySelector('#pmTxt').textContent = txt; }
@@ -1451,6 +1579,18 @@ const api = {
     results() { return flow.results.slice(); },
     best() { const o = {}; for (const n of GAME_NAMES) { const L = learn.game(n); o[n] = { best: L.best && L.best.txt, plays: L.plays, board: board.top[n] && board.top[n].txt, target: targetFor(n), beaten: beaten(n) }; } return o; },
     reset(name) { learn.reset(name); flow.results = []; store.del('results'); return 'reset'; },
+    // per-game target for the unbounded games (Champagne metres, Order Up / Where Is My Shot
+    // rounds, Ice Carving balls, Glass Stack height, Table Rush stages). null clears it.
+    target(name, v) {
+        name = String(name || '').toUpperCase();
+        if (!drivers[name]) return 'unknown game: ' + name;
+        const t = Object.assign({}, config.targets);
+        if (v == null) delete t[name]; else t[name] = v;
+        api.set('targets', t);
+        return name + ' → ' + JSON.stringify(targetFor(name));
+    },
+    // how fast the page's clock is running compared with the engines' own frame budget
+    speed() { return { dtMs: +(hooks.dtMean * 1000).toFixed(2), cappedFrames: +(hooks.dtCapped * 100).toFixed(0) + '%', frames: hooks.frames, note: hooks.dtCapped > 0.5 ? 'accelerated: the engines clamp dt to 50ms, so the sim advances in coarse steps' : 'normal' }; },
     frame: null,     // the most recent frame (debugging)
     rankMetric, targetFor, beaten, wantsPlay, tune, pourTailModel, pourMlFromSurface, FP_GLASS, stStep, stBottom, stTempColor, stTempRGB, clFlight, clPowerDecay, OU_BTN, Frame, publishFrame
 };

@@ -23,7 +23,7 @@ survivor-mode bot); same layout and release loop, separate script.
 | Blind Pour | MASTER ±0.5ml → learns its dribble tail, replays toward ±0.0 | reads the liquid surface each frame, releases when ml + expected tail meets the target |
 | Stir Stop | PERFECT ±0.00 | exact simulation of the thermal model, serve on the frame nearest the target |
 | Ice Carving | 60 BALLS (target) | 17 taps + DONE per frame, paced to the target |
-| Champagne Launch | 301m (target 300) | keeps power topped to what the 45° release will have left; flight model calibrates itself |
+| Champagne Launch | 2700m (target 2000) | pumps power through the launch hold too; flight model calibrates itself |
 | Shake Master | 513 (ceiling 520) | feeds the motion listener every 25 ms |
 | Quick Tab | ⏱18.9s (floor) | types the total on the first answer frame |
 | Order Up! | ROUND n KO (target) | punches the whole order in one frame, fails on purpose at the target |
@@ -80,14 +80,30 @@ Console API — `pineMini.*`:
 | `play('GLASS STACK')` | queue one game next |
 | `best()` | every game: best, plays, board #1, target, beaten |
 | `results()` | the play log |
-| `set('loop', false)` | config; persisted. Keys: `games`, `loop`, `stopWhenBeaten`, `margin`, `minMargin`, `howtoWaitMs`, `board`, `verbose`, `panel` |
+| `target('CHAMPAGNE LAUNCH', 20000)` | how far to push an unbounded game; `null` clears it |
+| `speed()` | the frame regime — tells you when a page-speed extension is costing precision |
+| `set('loop', false)` | config; persisted. Keys: `games`, `targets`, `loop`, `stopWhenBeaten`, `margin`, `minMargin`, `howtoWaitMs`, `howtoMaxMs`, `stallFrames`, `board`, `verbose`, `panel` |
 | `reset()` | forget everything learned |
 | `frame` | the last canvas frame (draw ops), for poking at a driver |
 
 Unbounded games (Ice Carving, Champagne, Order Up, Where Is My Shot, Glass
-Stack, Table Rush) aim at the board's #1 × (1 + `margin`) or + `minMargin`,
-whichever is larger, and stop there; without a board they use each driver's
-default. Nothing is ever submitted — the result stays on your screen.
+Stack, Table Rush) have no ceiling in the game itself — the bot decides where
+to stop. It aims at the board's #1 × (1 + `margin`) or + `minMargin`, whichever
+is larger; without a board it uses each driver's default (Champagne 2000 m,
+Order Up / Where Is My Shot round 25, Ice Carving 60, Glass Stack 40, Table
+Rush 15). Raise any of them with `pineMini.target(game, value)` — the cost is
+time: Order Up round 25 takes about five minutes because the game itself spends
+650 ms showing each drink of a 28-drink order. Nothing is ever submitted.
+
+**Page-speed extensions.** Every engine computes its physics as
+`dt = Math.min(0.05, …)`, so a 100× extension does *not* give 100× — the
+simulation advances at most 50 ms per frame (about 3× wall-clock), and each
+frame is a coarser step. Unbounded and timed games are fine and finish sooner;
+precision suffers, because the bot can only act on frame boundaries: Blind Pour
+resolves 0.5 ml per frame instead of 0.17, and Glass Stack's piece jumps ~15 px
+between frames instead of ~5. `pineMini.speed()` reports the regime, and results
+are tagged with the mean dt. Use the speed-up for the grinding games, and turn
+it off for Blind Pour, Stir Stop and Glass Stack.
 
 ## Run with Playwright instead
 
