@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pine & Co Minigame Bot
 // @namespace    https://pineandco.online/
-// @version      0.5.2
+// @version      0.5.3
 // @description  Autonomous record-chasing player for the Pine & Co "Bartender's Happy Hour" mini games. Watches the game's own canvas draw calls, drives every game with frame-exact synthetic input, plays the whole set on its own, tunes itself from its results and never submits a name to the leaderboard.
 // @author       you
 // @match        https://pineandco.online/*
@@ -42,7 +42,7 @@
  * ===================================================================== */
 (function () {
 'use strict';
-const SCRIPT_VERSION = '0.5.2';
+const SCRIPT_VERSION = '0.5.3';
 const TAG = '[PineMini]';
 const NS = 'pineMini_';
 const W = (typeof window !== 'undefined') ? window : globalThis;
@@ -1394,7 +1394,7 @@ defineDriver('FLY SWAT', {
 defineDriver('GLASS STACK', {
     kind: 'unbounded', defaultTarget: 40,
     make(ctx) {
-        let prevX = null, prevLevel = -1, ended = false, tapped = 0, tapLevel = -1, waited = 0;
+        let prevX = null, prevLevel = -1, ended = false, tapped = 0, tapLevel = -1, waited = 0, xLo = 1e9, xHi = -1e9, lastX = 0, lastWant = 0, lastLean = 0;
         return {
             frame(F) {
                 const c = input.el('hh_gscv');
@@ -1417,7 +1417,7 @@ defineDriver('GLASS STACK', {
                 const top = pieces.length > 1 ? pieces[pieces.length - 2] : null;
                 const topX = top ? top.cx : 200;
                 const topW = top ? top.w : 200;
-                if (level !== prevLevel) { prevLevel = level; prevX = null; waited = 0; }
+                if (level !== prevLevel) { prevLevel = level; prevX = null; waited = 0; xLo = 1e9; xHi = -1e9; }
                 if (tapLevel === level) { prevX = cur.cx; return; }     // tapped already, waiting for the new piece
                 const bal = F.rects.find(o => Math.abs(o.x - 200) < 0.6 && Math.abs(o.y - 74) < 0.6 && Math.abs(o.h - 8) < 0.6);
                 const lean = bal ? bal.w : 0;
@@ -1432,21 +1432,28 @@ defineDriver('GLASS STACK', {
                     if (over < need - 1) { input.down(c, 200, 240, c); ctx.acted(); tapLevel = level; ended = true; ctx.log('slid off on purpose at', level); }
                     prevX = x; return;
                 }
-                if (prevX == null) { prevX = x; return; }
+                if (prevX == null) { prevX = x; xLo = xHi = x; return; }
                 waited++;
+                if (x < xLo) xLo = x;
+                if (x > xHi) xHi = x;
                 const want = topX + clamp(-lean / 0.78, -6, 6);
-                // Tap the frame the swing crosses `want` — the piece is momentarily at the
-                // lean-cancelling spot. Precision equals one frame-step (~0.4 px at 240 Hz) and
-                // it fires every swing at any refresh. (The old nearest-sample scan almost never
-                // picked the current frame at high refresh, so the driver never tapped at all.)
-                if ((x - want) * (prevX - want) <= 0 && x !== prevX) {
+                lastX = x; lastWant = want; lastLean = lean;
+                // Primary: tap the frame the swing crosses `want` (the lean-cancelling spot) —
+                // precise to one frame-step at any refresh. Fallback: if no crossing has fired
+                // for ~2 s (some live builds sample the swing so it never straddles `want`
+                // cleanly), tap at the nearest approach so the driver can never stall at a level.
+                const secs = waited * (F.dt > 0.0005 ? F.dt : 0.0042);
+                const amp2 = Math.max(1, (xHi - xLo) / 2);
+                const crossed = (x - want) * (prevX - want) <= 0 && x !== prevX;
+                const nearest = secs > 2 && Math.abs(x - want) <= Math.abs(prevX - want) && Math.abs(x - want) < amp2 * 0.08;
+                if (crossed || nearest) {
                     input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level;
-                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1), 'after', waited, 'frames');
+                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1), 'after', waited, 'frames', crossed ? 'cross' : 'nearest');
                 }
                 prevX = x;
             },
             result(m) { ctx.log('stacked', m && m.v, 'taps', tapped, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max'); },
-            state() { return { level: prevLevel, tapped, tapLevel, waited }; }
+            state() { return { level: prevLevel, tapped, tapLevel, waited, curX: Math.round(lastX), want: Math.round(lastWant), prevX: prevX == null ? null : Math.round(prevX), swing: [Math.round(xLo), Math.round(xHi)], lean: +lastLean.toFixed(1), over: safe(() => ctx.overBudget(), null), targetInf: !isFinite(ctx.target.v) }; }
         };
     }
 });

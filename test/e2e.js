@@ -12,6 +12,7 @@ const verbose = !!flag('--verbose', false);
 const timeoutS = +flag('--timeout', 300);
 const nPages = Math.max(1, +flag('--pages', 3));
 const plays = Math.max(1, +flag('--plays', 1));      // play each game this many times (learning check)
+const maxMode = !!flag('--max', false);
 const port = 8123 + Math.floor(Math.random() * 500);
 
 // what "good" means per game on the reference page (placeholder art, no board)
@@ -57,7 +58,7 @@ function chromePath() {
         const page = await browser.newPage({ viewport: { width: 520, height: 900 } });
         page.on('console', m => { const t = m.text(); if (/\[PineMini\]/.test(t) && (verbose || /result|playing|target|fired|served|KO|plan|distance|pours/.test(t))) console.log('[p' + pi + ']', t.slice(0, 220)); });
         page.on('pageerror', e => console.log('[p' + pi + ' pageerror]', e.message));
-        const cfg = { games: plays > 1 ? [].concat(...Array.from({ length: plays }, () => list)) : list, loop: false, once: true, board: false, panel: false, howtoWaitMs: 500, resultWaitMs: 300, verbose, e2eTargets: E2E_TARGET };
+        const cfg = maxMode ? { games: list, loop: false, once: true, board: false, panel: false, howtoWaitMs: 500, resultWaitMs: 300, verbose, max: true, roundBudgetMin: 0.4 } : { games: plays > 1 ? [].concat(...Array.from({ length: plays }, () => list)) : list, loop: false, once: true, board: false, panel: false, howtoWaitMs: 500, resultWaitMs: 300, verbose, e2eTargets: E2E_TARGET };
         await page.addInitScript('window.__pineMiniConfig = ' + JSON.stringify(cfg) + ';\n' + script);
         await page.goto('http://127.0.0.1:' + port + '/', { waitUntil: 'domcontentloaded' });
         const deadline = Date.now() + timeoutS * 1000;

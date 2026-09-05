@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.3 — Glass Stack cannot stall; max-mode test path; richer diag (2026-09-05)
+
+- Glass Stack now guarantees a placement: it taps at the swing crossing as
+  before, and if no crossing has registered for ~2 s (a live build was sitting
+  at level 0, tapping nothing), it taps at the nearest approach to the
+  lean-cancelling point instead. It can no longer wait forever.
+- Its `state()` now reports curX / want / prevX / observed swing / lean /
+  over-budget / whether the target is unbounded — so a stuck round is
+  diagnosable from one `diag()`.
+- `test/e2e.js --max` exercises real max mode (target = ∞, short round
+  budget); every finite-`--targets` run had skipped that path.
+
 ## 0.5.2 — Glass Stack taps again; Table Rush climbs again (2026-09-05)
 
 Both from live diag on a 240 Hz display.
