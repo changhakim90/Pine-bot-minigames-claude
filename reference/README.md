@@ -1,18 +1,16 @@
-# reference/ — the game's real code
+# reference/
 
-The drivers in `src/04-games.js` are bound to the game's own variable and
-function names. Those names come from the game's source, not from guesses,
-and the source is captured from the browser because this repo's build
-environment cannot reach `pineandco.online`.
+`happyhour.html` is the game as served by pineandco.online (captured from the
+page source on 2026-09-05), trimmed to what the bot needs:
 
-Drop these files here and commit them:
+- the survivor title screen is a stub with the same `goHappyHour()` button;
+- the `#happyHour` DOM, the `hhOpen()/hhClose()` bridge and the whole
+  "Bartender's Happy Hour" script are **verbatim** — every mini game runs
+  from its real code;
+- the three base64 pong clips are stubbed (`PONG_CLIPS = ["","",""]`).
 
-| file | how to get it |
-| --- | --- |
-| `pineandco-inline-scripts.js` | panel **source ⬇** button, or `pineMini.dumpSource()` in the console, or paste `tools/console-capture.js` into the console (works without the userscript) |
-| `pine-mini-probe-*.json` | panel **probe ⬇** / `pineMini.dump()` — which games the script mentions (with context), every top-level name and its runtime type, window functions, listeners, canvases |
-| `pine-mini-record-*.json` | panel **rec 15s** / `pineMini.record(15)` — play one round by hand while it samples every global per frame; only the globals that changed are kept, which is exactly the list of bindings that game needs |
-
-Capture the probe and the recording **while the mini game is on screen**, one
-recording per game. `run/playwright.js` saves the downloads into this folder
-automatically.
+`test/server.js` serves it with generated placeholder PNGs for every asset,
+and `test/e2e.js` plays every game against it in headless Chromium. When the
+site changes, recapture the page source and replace this file; the drivers'
+constants live in `src/04-games-a.js` / `src/05-games-b.js` with the source
+line they came from.

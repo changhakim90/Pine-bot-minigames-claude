@@ -1,28 +1,47 @@
 # Pine Bot — Minigames
 
-Record-chasing bot for the thirteen mini games on [Pine & Co](https://pineandco.online/):
+Autonomous record-chasing player for the thirteen mini games on
+[Pine & Co](https://pineandco.online/) ("Bartender's Happy Hour"):
 Quick Tab · Shake Master · Ice Carving · Blind Pour · Fresh Squeeze · Champagne
-Launch · Stir Stop · Where Is My Shot · Fly Swat · Order Up · Table Rush · Tip
+Launch · Stir Stop · Where Is My Shot? · Fly Swat · Order Up! · Table Rush · Tip
 Catch · Glass Stack.
 
-It reads the game's real state by name, ticks in lock-step with the game's own
-animation frame, and answers with frame-exact synthetic input — a tap the
-instant a needle will cross its target, a swat on every fly with its velocity
-led, the shell that actually holds the shot. It does not modify the game.
+Install it, open the site, and it plays the whole set on its own: it walks the
+hub, starts each game, plays it from what the game draws on its canvas,
+reads the result, presses **OK** — never a name, never SUBMIT — and goes to
+the next one. It reads the public leaderboard to know what #1 is, aims past
+it, learns from every result (its pour tail, its cork's flight, its tuned
+parameters) and keeps replaying whatever has not beaten its target yet.
 
 Sibling of [`pine-bot`](https://github.com/changhakim90/pine-bot) (the
 survivor-mode bot); same layout and release loop, separate script.
+
+## What it gets (reference page, headless, first run — see CHANGELOG)
+
+| game | result | how |
+| --- | --- | --- |
+| Blind Pour | MASTER ±0.5ml → learns its dribble tail, replays toward ±0.0 | reads the liquid surface each frame, releases when ml + expected tail meets the target |
+| Stir Stop | PERFECT ±0.00 | exact simulation of the thermal model, serve on the frame nearest the target |
+| Ice Carving | 60 BALLS (target) | 17 taps + DONE per frame, paced to the target |
+| Champagne Launch | 301m (target 300) | keeps power topped to what the 45° release will have left; flight model calibrates itself |
+| Shake Master | 513 (ceiling 520) | feeds the motion listener every 25 ms |
+| Quick Tab | ⏱18.9s (floor) | types the total on the first answer frame |
+| Order Up! | ROUND n KO (target) | punches the whole order in one frame, fails on purpose at the target |
+| Where Is My Shot? | ROUND n KO (target) | follows the cover the shot went under |
+| Fresh Squeeze | 1775ml (≈ceiling) | one gesture burst per 421 ms press cycle |
+| Tip Catch | 75 | tracks every item's speed, catches the earliest reachable good one |
+| Fly Swat | 187 | one shot per fly per frame |
+| Glass Stack | n STACKED (target) | predicts the swing, taps at the crossing that cancels the lean |
+| Table Rush | STAGE n (target) | receding-horizon search over key plans, walks through mobs while invulnerable |
 
 ## Layout
 
 ```
 src/        the script, in six ordered parts (edit these, never dist/)
 dist/       pine-mini.user.js — built, committed, what the browser installs
-test/       headless tests (fake DOM + game globals, no browser)
+test/       run.js (fake browser), server.js + e2e.js (every game in headless Chromium)
 run/        Playwright runner — no userscript manager needed
-tools/      console-capture.js — grab the game source from DevTools
-reference/  the game's captured source, probes, recordings
-results/    record log
+reference/  happyhour.html — the game's real code, used by the tests
 ```
 
 ## Install in a browser (Violentmonkey / Tampermonkey)
@@ -35,58 +54,55 @@ The build stamps these headers into `dist/pine-mini.user.js` from
 // @downloadURL  https://raw.githubusercontent.com/changhakim90/Pine-bot-minigames-claude/main/dist/pine-mini.user.js
 ```
 
-So auto-update needs exactly two things:
-
 1. **Install FROM the raw URL once** (not by pasting the file into the editor):
    open <https://raw.githubusercontent.com/changhakim90/Pine-bot-minigames-claude/main/dist/pine-mini.user.js>
    in the browser that has Violentmonkey — it offers to install.
-2. **Every push to `main` bumps the version and commits a rebuilt `dist/`**
-   (CI fails the push otherwise). Violentmonkey compares the remote
-   `@version` against the installed one and pulls the new file on its own
-   schedule — set *Violentmonkey → Settings → Update → check interval* to
-   1 hour, or force it from the dashboard's ⟳ button.
-
-Check what the update URL is serving (raw.githubusercontent can lag a push by a few minutes):
-
-```
-curl -s https://raw.githubusercontent.com/changhakim90/Pine-bot-minigames-claude/main/dist/pine-mini.user.js | grep -m2 -E '@version|SCRIPT_VERSION'
-```
+2. Every push to `main` bumps the version and commits a rebuilt `dist/`
+   (CI fails the push otherwise). Violentmonkey pulls the new file on its
+   own schedule — set *Settings → Update → check interval* to 1 hour, or
+   force it from the dashboard's ⟳ button.
 
 If the survivor bot (`pine-bot`) is also installed, disable one while the
 other plays — both hook the page's animation frame.
 
 ## Using it
 
-A small panel sits bottom-right. Console API: `pineMini.*`.
+Open pineandco.online. The bot presses START, enters the hub and plays.
+A panel at bottom-left shows the state, the last result, each game's best,
+the board's #1 and a ✓ when beaten (`pause` / `skip` / `board` / `hide`;
+Ctrl+Shift+P brings it back).
 
-| | |
+Console API — `pineMini.*`:
+
+| call | does |
 | --- | --- |
-| **auto** | drive the detected mini game (default on) |
-| **observe** | hooks and panel only, no input |
-| **source ⬇** | download every inline script of the page → commit to `reference/` |
-| **probe ⬇** | download a JSON summary of the game's internals |
-| **rec 15s** | record every changing global for 15 s while *you* play |
-| `pineMini.bind('flyswat', { list: 'flies' })` | set a driver's bindings (persisted) |
-| `pineMini.set({ inputLeadMs: 8 })` | config (persisted) |
-| `pineMini.grep(/Stir Stop/, 400)` | source snippets around a regex |
-| `pineMini.G('score')` | read any game global by name |
-| `pineMini.best()` | best score seen per game |
+| `start()` / `stop()` / `skip()` | control the loop |
+| `play('GLASS STACK')` | queue one game next |
+| `best()` | every game: best, plays, board #1, target, beaten |
+| `results()` | the play log |
+| `set('loop', false)` | config; persisted. Keys: `games`, `loop`, `stopWhenBeaten`, `margin`, `minMargin`, `howtoWaitMs`, `board`, `verbose`, `panel` |
+| `reset()` | forget everything learned |
+| `frame` | the last canvas frame (draw ops), for poking at a driver |
 
-## Status
+Unbounded games (Ice Carving, Champagne, Order Up, Where Is My Shot, Glass
+Stack, Table Rush) aim at the board's #1 × (1 + `margin`) or + `minMargin`,
+whichever is larger, and stop there; without a board they use each driver's
+default. Nothing is ever submitted — the result stays on your screen.
 
-**0.1.0 — framework complete, drivers unbound.** Every driver is written and
-tested headless against synthetic state, but none has been run against the
-real game yet: the environment this repo was built in cannot reach
-`pineandco.online`. The bot therefore stays in OBSERVE on every game until its
-bindings resolve. Capture the game once (see `reference/README.md`), commit the
-capture, and the next version binds all thirteen.
+## Run with Playwright instead
 
-## Develop
-
-```
-npm run build     # src/*.js -> dist/pine-mini.user.js
-npm test          # build + syntax check + headless tests
-node run/playwright.js [--headless]   # persistent ./profile, downloads → reference/
+```bash
+npm i playwright && npx playwright install chromium
+npm run run                 # headed; profile/ keeps what it learned
+npm run run:headless
+node run/playwright.js --games "STIR STOP" --once --verbose
 ```
 
-Bump the version in `package.json` only. Tag releases `vX.Y.Z`.
+## Development
+
+```bash
+npm test            # build + syntax + unit tests
+node test/e2e.js    # all 13 games against reference/happyhour.html
+```
+
+See `CLAUDE.md` for the rules a driver has to follow.
