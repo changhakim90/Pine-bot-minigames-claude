@@ -71,7 +71,9 @@ const DEFAULT_CONFIG = {
     stallFrames: 3600,      // frames a driver may go without acting before the round is abandoned (~1 min)
     targets: {},            // per-game target override, e.g. {'ORDER UP!': 60}
     resultWaitMs: 900,      // read the result screen this long before pressing OK
-    margin: 0.10,           // unbounded games aim this far above the board's #1 (fraction)
+    max: true,              // unbounded games play for the most the round allows (below); false = board #1 + margin
+    roundBudgetMin: 12,     // max mode: minutes an endless round may run before the driver ends it on purpose
+    margin: 0.10,           // (max: false) unbounded games aim this far above the board's #1 (fraction)
     minMargin: 2,           // ...and at least this many units above it
     board: true,            // read the public leaderboard (GET only) to set targets
     submit: false,          // NEVER submit — kept here only so the rule is visible; ignored if true
@@ -149,7 +151,9 @@ function installHooks() {
             if (a.length >= 9) { sx = a[1]; sy = a[2]; dx = a[5]; dy = a[6]; dw = a[7]; dh = a[8]; }
             else { dx = a[1]; dy = a[2]; dw = a.length >= 5 ? a[3] : (im.width || 0); dh = a.length >= 5 ? a[4] : (im.height || 0); }
             const [cx, cy, m] = xf(this, dx + dw / 2, dy + dh / 2);
-            const w = dw * hypot(m.a, m.b), h = dh * hypot(m.c, m.d);
+            // extents along the SCREEN axes (a sprite drawn after rotate(-90°) is as wide on
+            // screen as its dh) — Glass Stack rotates some pieces, Table Rush every guest
+            const w = Math.abs(dw * m.a) + Math.abs(dh * m.c), h = Math.abs(dw * m.b) + Math.abs(dh * m.d);
             cur.push({ op: 'img', src: imgName(im), cx, cy, w, h, sx, sy, rot: Math.atan2(m.b, m.a) });
         });
         wrap('fillText', function (cur, a) {

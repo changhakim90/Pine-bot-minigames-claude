@@ -22,17 +22,17 @@ survivor-mode bot); same layout and release loop, separate script.
 | --- | --- | --- |
 | Blind Pour | MASTER ±0.5ml → learns its dribble tail, replays toward ±0.0 | reads the liquid surface each frame, releases when ml + expected tail meets the target |
 | Stir Stop | PERFECT ±0.00 | exact simulation of the thermal model, serve on the frame nearest the target |
-| Ice Carving | 60 BALLS (target) | 17 taps + DONE per frame, paced to the target |
-| Champagne Launch | 2700m (target 2000) | pumps power through the launch hold too; flight model calibrates itself |
+| Ice Carving | 2,250 BALLS | 17 taps + DONE per ball, several balls per frame (tuned) |
+| Champagne Launch | 20,000m planned | pumps power through the launch hold too; flight model calibrates itself |
 | Shake Master | 513 (ceiling 520) | feeds the motion listener every 25 ms |
 | Quick Tab | ⏱18.9s (floor) | types the total on the first answer frame |
-| Order Up! | ROUND n KO (target) | punches the whole order in one frame, fails on purpose at the target |
-| Where Is My Shot? | ROUND n KO (target) | follows the cover the shot went under |
+| Order Up! | ROUND n KO (time budget) | punches the whole order in one frame; ends the round when the budget is spent |
+| Where Is My Shot? | ROUND n KO (time budget) | follows the cover the shot went under |
 | Fresh Squeeze | 1775ml (≈ceiling) | one gesture burst per 421 ms press cycle |
 | Tip Catch | 75 | tracks every item's speed, catches the earliest reachable good one |
 | Fly Swat | 187 | one shot per fly per frame |
-| Glass Stack | n STACKED (target) | predicts the swing, taps at the crossing that cancels the lean |
-| Table Rush | STAGE n (target) | receding-horizon search over key plans; spends one hit per stage as 1.5 s of free passage (a glass comes back per stage) |
+| Glass Stack | n STACKED (time budget) | looks three swings ahead for the frame that lands on the lean-cancelling spot (0.1–1.6 px) |
+| Table Rush | STAGE n (until it falls) | receding-horizon search over key plans; in crowded halls spends one hit per stage as 1.5 s of passage (a glass comes back per stage) |
 
 ## Layout
 
@@ -80,20 +80,28 @@ Console API — `pineMini.*`:
 | `play('GLASS STACK')` | queue one game next |
 | `best()` | every game: best, plays, board #1, target, beaten |
 | `results()` | the play log |
-| `target('CHAMPAGNE LAUNCH', 20000)` | how far to push an unbounded game; `null` clears it |
+| `target('CHAMPAGNE LAUNCH', 50000)` | pin an unbounded game to a number; `null` clears it |
+| `diag()` | what the driver sees right now, as text — `copy(pineMini.diag())` |
 | `speed()` | the frame regime — tells you when a page-speed extension is costing precision |
-| `set('loop', false)` | config; persisted. Keys: `games`, `targets`, `loop`, `stopWhenBeaten`, `margin`, `minMargin`, `howtoWaitMs`, `howtoMaxMs`, `stallFrames`, `board`, `verbose`, `panel` |
+| `set('loop', false)` | config; persisted. Keys: `games`, `max`, `roundBudgetMin`, `targets`, `loop`, `stopWhenBeaten`, `margin`, `minMargin`, `howtoWaitMs`, `howtoMaxMs`, `stallFrames`, `board`, `verbose`, `panel` |
 | `reset()` | forget everything learned |
 | `frame` | the last canvas frame (draw ops), for poking at a driver |
 
 Unbounded games (Ice Carving, Champagne, Order Up, Where Is My Shot, Glass
-Stack, Table Rush) have no ceiling in the game itself — the bot decides where
-to stop. It aims at the board's #1 × (1 + `margin`) or + `minMargin`, whichever
-is larger; without a board it uses each driver's default (Champagne 2000 m,
-Order Up / Where Is My Shot round 25, Ice Carving 60, Glass Stack 40, Table
-Rush 15). Raise any of them with `pineMini.target(game, value)` — the cost is
-time: Order Up round 25 takes about five minutes because the game itself spends
-650 ms showing each drink of a 28-drink order. Nothing is ever submitted.
+Stack, Table Rush) have no ceiling in the game itself. In **max mode** (the
+default) the bot plays each for the most a round allows: Ice Carving as many
+balls per frame as the page can take, Champagne 20,000 m, Table Rush until
+the game ends it, and the endless rounds (Order Up, Where Is My Shot, Glass
+Stack) until a time budget (`roundBudgetMin`, 12 min) is spent — then the
+driver ends the round on purpose so the record is as high as the time
+allowed. Pin a game to a number with `pineMini.target(game, value)`, or
+`pineMini.set('max', false)` to aim at the board's #1 + `margin` instead.
+Nothing is ever submitted.
+
+**Reporting a game that misbehaves:** while it is running, paste
+`copy(pineMini.diag())` in the console — everything the driver sees (sprites
+with positions, HUD texts, frame timing, target, recent results) lands on
+your clipboard as text.
 
 **Page-speed extensions.** Every engine computes its physics as
 `dt = Math.min(0.05, …)`, so a 100× extension does *not* give 100× — the

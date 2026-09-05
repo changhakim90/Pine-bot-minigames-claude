@@ -172,6 +172,8 @@ function targetFor(name) {
     if (spec.kind === 'unbounded') {
         const forced = (config.targets && config.targets[name]) || (config.e2eTargets && config.e2eTargets[name]);
         if (forced) return { v: forced, low: false, why: 'set' };
+        // max mode: no number to stop at — the round runs to the game's end or the time budget
+        if (config.max) return { v: spec.maxTarget == null ? Infinity : spec.maxTarget, low: false, why: 'max' };
         let v = spec.defaultTarget || 10;
         if (top && !top.low) v = Math.ceil(Math.max(top.v * (1 + config.margin), top.v + config.minMargin));
         if (g.best && !g.best.low && g.best.v >= v && top && g.best.v > top.v) v = g.best.v;    // already there: hold
@@ -188,13 +190,18 @@ function beaten(name) {
     if (spec.kind === 'unbounded') return g.best.v >= t.v;
     return isBetter(g.best.v, t.v, t.low);
 }
+// did one of the last three plays set the best?
+function improving(g) {
+    const h = g.hist.slice(-3);
+    return !!g.best && h.some(e => e.at === g.best.at);
+}
 // does this game deserve another play right now?
 function wantsPlay(name) {
     const g = learn.game(name), spec = drivers[name] || {};
     if (!drivers[name]) return false;
     if (!g.plays) return true;
     if (spec.kind === 'precision') return !beaten(name) && g.plays < (spec.maxPlays || 400);
-    if (spec.kind === 'unbounded') return !beaten(name);
+    if (spec.kind === 'unbounded') return !beaten(name) && !(config.max && g.plays >= (spec.maxPlays || 3) && !improving(g));
     // capped: keep playing while the recent plays still improve
     if (g.plays < 3) return true;
     const h = g.hist.slice(-6);
@@ -325,8 +332,12 @@ const flow = {
         const g = learn.game(name);
         const ctx = { name, params, cal: g.cal, learn: g, target: targetFor(name), board: board.top[name] || null, frames: 0, t0: 0, acted: () => { }, log: (...a) => log(name + ':', ...a) };
         ctx.acted = () => { if (this.game) this.game.actedAt = this.game.frames; };
+        // max mode: endless rounds get a wall-clock budget; drivers that can end a round on
+        // purpose (Order Up, Where Is My Shot, Glass Stack) do so once it runs out
+        ctx.budgetMs = config.max && !isFinite(ctx.target.v) ? config.roundBudgetMin * 60000 : Infinity;
+        ctx.overBudget = () => now() - this.game.t0 > ctx.budgetMs;
         this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0, actedAt: 0 };
-        log('playing', name, 'target', ctx.target.v, '(' + ctx.target.why + ')', 'params', JSON.stringify(params));
+        log('playing', name, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max', '(' + ctx.target.why + ')', 'params', JSON.stringify(params));
     },
     frame(f) {
         const g = this.game;

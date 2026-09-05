@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pine & Co Minigame Bot
 // @namespace    https://pineandco.online/
-// @version      0.3.0
+// @version      0.4.0
 // @description  Autonomous record-chasing player for the Pine & Co "Bartender's Happy Hour" mini games. Watches the game's own canvas draw calls, drives every game with frame-exact synthetic input, plays the whole set on its own, tunes itself from its results and never submits a name to the leaderboard.
 // @author       you
 // @match        https://pineandco.online/*
@@ -42,7 +42,7 @@
  * ===================================================================== */
 (function () {
 'use strict';
-const SCRIPT_VERSION = '0.3.0';
+const SCRIPT_VERSION = '0.4.0';
 const TAG = '[PineMini]';
 const NS = 'pineMini_';
 const W = (typeof window !== 'undefined') ? window : globalThis;
@@ -73,7 +73,9 @@ const DEFAULT_CONFIG = {
     stallFrames: 3600,      // frames a driver may go without acting before the round is abandoned (~1 min)
     targets: {},            // per-game target override, e.g. {'ORDER UP!': 60}
     resultWaitMs: 900,      // read the result screen this long before pressing OK
-    margin: 0.10,           // unbounded games aim this far above the board's #1 (fraction)
+    max: true,              // unbounded games play for the most the round allows (below); false = board #1 + margin
+    roundBudgetMin: 12,     // max mode: minutes an endless round may run before the driver ends it on purpose
+    margin: 0.10,           // (max: false) unbounded games aim this far above the board's #1 (fraction)
     minMargin: 2,           // ...and at least this many units above it
     board: true,            // read the public leaderboard (GET only) to set targets
     submit: false,          // NEVER submit — kept here only so the rule is visible; ignored if true
@@ -151,7 +153,9 @@ function installHooks() {
             if (a.length >= 9) { sx = a[1]; sy = a[2]; dx = a[5]; dy = a[6]; dw = a[7]; dh = a[8]; }
             else { dx = a[1]; dy = a[2]; dw = a.length >= 5 ? a[3] : (im.width || 0); dh = a.length >= 5 ? a[4] : (im.height || 0); }
             const [cx, cy, m] = xf(this, dx + dw / 2, dy + dh / 2);
-            const w = dw * hypot(m.a, m.b), h = dh * hypot(m.c, m.d);
+            // extents along the SCREEN axes (a sprite drawn after rotate(-90°) is as wide on
+            // screen as its dh) — Glass Stack rotates some pieces, Table Rush every guest
+            const w = Math.abs(dw * m.a) + Math.abs(dh * m.c), h = Math.abs(dw * m.b) + Math.abs(dh * m.d);
             cur.push({ op: 'img', src: imgName(im), cx, cy, w, h, sx, sy, rot: Math.atan2(m.b, m.a) });
         });
         wrap('fillText', function (cur, a) {
@@ -517,6 +521,8 @@ function targetFor(name) {
     if (spec.kind === 'unbounded') {
         const forced = (config.targets && config.targets[name]) || (config.e2eTargets && config.e2eTargets[name]);
         if (forced) return { v: forced, low: false, why: 'set' };
+        // max mode: no number to stop at — the round runs to the game's end or the time budget
+        if (config.max) return { v: spec.maxTarget == null ? Infinity : spec.maxTarget, low: false, why: 'max' };
         let v = spec.defaultTarget || 10;
         if (top && !top.low) v = Math.ceil(Math.max(top.v * (1 + config.margin), top.v + config.minMargin));
         if (g.best && !g.best.low && g.best.v >= v && top && g.best.v > top.v) v = g.best.v;    // already there: hold
@@ -533,13 +539,18 @@ function beaten(name) {
     if (spec.kind === 'unbounded') return g.best.v >= t.v;
     return isBetter(g.best.v, t.v, t.low);
 }
+// did one of the last three plays set the best?
+function improving(g) {
+    const h = g.hist.slice(-3);
+    return !!g.best && h.some(e => e.at === g.best.at);
+}
 // does this game deserve another play right now?
 function wantsPlay(name) {
     const g = learn.game(name), spec = drivers[name] || {};
     if (!drivers[name]) return false;
     if (!g.plays) return true;
     if (spec.kind === 'precision') return !beaten(name) && g.plays < (spec.maxPlays || 400);
-    if (spec.kind === 'unbounded') return !beaten(name);
+    if (spec.kind === 'unbounded') return !beaten(name) && !(config.max && g.plays >= (spec.maxPlays || 3) && !improving(g));
     // capped: keep playing while the recent plays still improve
     if (g.plays < 3) return true;
     const h = g.hist.slice(-6);
@@ -670,8 +681,12 @@ const flow = {
         const g = learn.game(name);
         const ctx = { name, params, cal: g.cal, learn: g, target: targetFor(name), board: board.top[name] || null, frames: 0, t0: 0, acted: () => { }, log: (...a) => log(name + ':', ...a) };
         ctx.acted = () => { if (this.game) this.game.actedAt = this.game.frames; };
+        // max mode: endless rounds get a wall-clock budget; drivers that can end a round on
+        // purpose (Order Up, Where Is My Shot, Glass Stack) do so once it runs out
+        ctx.budgetMs = config.max && !isFinite(ctx.target.v) ? config.roundBudgetMin * 60000 : Infinity;
+        ctx.overBudget = () => now() - this.game.t0 > ctx.budgetMs;
         this.game = { name, params, ctx, driver: spec.make(ctx), t0: now(), frames: 0, actedAt: 0 };
-        log('playing', name, 'target', ctx.target.v, '(' + ctx.target.why + ')', 'params', JSON.stringify(params));
+        log('playing', name, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max', '(' + ctx.target.why + ')', 'params', JSON.stringify(params));
     },
     frame(f) {
         const g = this.game;
@@ -911,11 +926,15 @@ defineDriver('STIR STOP', {
 // below = shatter (600 ms stun). The gauge is drawn as a fill rect at x=354,
 // so it is read back exactly. 17 taps + DONE inside one frame = one ball
 // per frame; the driver paces balls to reach its target across the 15 s.
+// Every ball costs the game a particle burst and a sound, so balls-per-frame is
+// tuned rather than fixed: too many and the page slows, the engine's dt hits its
+// cap and fewer frames — hence fewer balls — fit in the 15 s.
 defineDriver('ICE CARVING', {
     kind: 'unbounded', defaultTarget: 60,
+    tunables: { perFrame: { min: 2, max: 14, step: 2, init: 6, explore: 0.3 } },
     make(ctx) {
         let count = 0, armedAt = 0, stunUntil = 0;
-        const maxPerFrame = 6;
+        const maxPerFrame = ctx.params.perFrame || 6;
         return {
             frame(F) {
                 const bT = input.el('hh_icTap'), bD = input.el('hh_icDone');
@@ -930,10 +949,14 @@ defineDriver('ICE CARVING', {
                 if (F.t < stunUntil) return;
                 const target = ctx.target.v;
                 const elapsed = 15 - left;
-                const due = Math.min(target, Math.ceil(target * (elapsed + 0.4) / 15));   // pace with a little slack
-                let todo = Math.max(0, due - count);
-                if (left < 1.0) todo = Math.max(0, target - count);                      // finish early rather than late
-                todo = Math.min(todo, maxPerFrame);
+                let todo;
+                if (!isFinite(target)) todo = maxPerFrame;                                   // max mode: flat out
+                else {
+                    const due = Math.min(target, Math.ceil(target * (elapsed + 0.4) / 15));   // pace with a little slack
+                    todo = Math.max(0, due - count);
+                    if (left < 1.0) todo = Math.max(0, target - count);                      // finish early rather than late
+                    todo = Math.min(todo, maxPerFrame);
+                }
                 // gauge = (420 - fy) / 270 * 100 from fillRect(354, fy, 16, 420 - fy)
                 const gr = F.rects.find(o => Math.abs(o.x - 354) < 0.6 && Math.abs(o.w - 16) < 0.6);
                 let gauge = gr ? (420 - gr.y) / 270 * 100 : 0;
@@ -978,7 +1001,7 @@ function clPowerDecay(p, dt, frames) { for (let i = 0; i < frames; i++) p = Math
 // Very large targets do cost the game work: it draws a 25 m tick on its minimap for
 // every mark, and one particle per tap.
 defineDriver('CHAMPAGNE LAUNCH', {
-    kind: 'unbounded', defaultTarget: 2000,
+    kind: 'unbounded', defaultTarget: 2000, maxTarget: 20000,
     make(ctx) {
         const m = { worldX: 0, vel: 0, power: 0, angle: 12, hold: false, fired: false, launchX: 0, R: 0, pFire: 0 };
         let run = false, dtAvg = 1 / 60, planned = null;
@@ -1145,7 +1168,7 @@ defineDriver('ORDER UP!', {
                 let seq = Array.isArray(W.__ouSeq) && W.__ouRound === round ? W.__ouSeq.slice() : (Array.isArray(W.__ouSeq) && W.__ouSeq.length === 3 + round ? W.__ouSeq.slice() : seen);
                 if (!seq.length) return;
                 doneRound = round;
-                if (round >= ctx.target.v) {
+                if (round >= ctx.target.v || ctx.overBudget()) {
                     const wrong = (seq[0] + 1) % 10;
                     const p = OU_BTN(wrong); input.down(c, p.x, p.y, c); ctx.acted(); failed = true;
                     ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')');
@@ -1202,7 +1225,7 @@ defineDriver('WHERE IS MY SHOT?', {
                 }
                 picked = round;
                 let idx = shotIdx >= 0 ? shotIdx : 0;
-                if (round >= ctx.target.v) { idx = (idx + 1) % covers.length; failed = true; ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')'); }
+                if (round >= ctx.target.v || ctx.overBudget()) { idx = (idx + 1) % covers.length; failed = true; ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')'); }
                 else if (shotIdx < 0) ctx.log('lost the shot this round — guessing');
                 input.down(c, covers[idx].cx, 288, c);
                 ctx.acted();
@@ -1320,9 +1343,9 @@ defineDriver('TIP CATCH', {
 });
 
 // ---------------------------------------------------------------- FLY SWAT
-// A tap kills the nearest fly within 32 px. Flies are drawn 34 px wide, so
-// every fly on screen gets one pointerdown at its own centre, every frame —
-// nothing ever lands on the fruit.
+// A tap kills the nearest fly within 32 px. Every fly on screen (fs_fly1/2,
+// drawn rotated to its heading) gets one pointerdown at its own centre, every
+// frame — nothing ever lands on the fruit.
 defineDriver('FLY SWAT', {
     kind: 'capped',
     make(ctx) {
@@ -1333,7 +1356,7 @@ defineDriver('FLY SWAT', {
                 if (!c || F.has('TIME UP!')) return;
                 if (!F.text(/^x \d+$/, { x: 14, y: 38, d: 4 })) return;      // HUD only in 'play'
                 for (const o of F.imgs) {
-                    if (!/^fs_fly[12]$/.test(o.src) || Math.abs(o.w - 34) > 0.6) continue;
+                    if (!/^fs_fly[12]$/.test(o.src)) continue;      // the intro's big fly is fs_bigfly
                     input.down(c, o.cx, o.cy, c); shots++; ctx.acted();
                 }
             },
@@ -1344,13 +1367,16 @@ defineDriver('FLY SWAT', {
 
 // ---------------------------------------------------------------- GLASS STACK
 // The swinging piece is drawn at cx0 + sin(ph)·amp with known amp/speed per
-// level, so its next position is predicted exactly from this frame's x.
-// Tap when the piece crosses the point that also cancels the tray's lean
-// (read back from the BALANCE bar). At the target height, miss on purpose.
+// level, so every future frame's position follows from this frame's x. The
+// piece only exists at discrete frame positions — up to 15 px apart when a
+// page-speed extension pins dt at 50 ms — so rather than tapping at the first
+// crossing, the driver looks a few swings ahead for the sampled position that
+// lands nearest the spot which also cancels the tray's lean (read back from
+// the BALANCE bar), and taps on that frame. At the target height, miss on purpose.
 defineDriver('GLASS STACK', {
     kind: 'unbounded', defaultTarget: 40,
     make(ctx) {
-        let prevX = null, prevLevel = -1, ended = false, tapped = 0, tapLevel = -1;
+        let prevX = null, prevLevel = -1, ended = false, tapped = 0, tapLevel = -1, waited = 0;
         return {
             frame(F) {
                 const c = input.el('hh_gscv');
@@ -1361,7 +1387,7 @@ defineDriver('GLASS STACK', {
                 // Pieces by sprite name; when a piece image is missing the game draws
                 // fillRect(x - w/2, y, w, h) instead, so read those in the same order.
                 let pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src))
-                    .map(o => ({ cx: o.cx, w: Math.min(o.w, o.h) }));
+                    .map(o => ({ cx: o.cx, w: o.w }));      // o.w is the on-screen width, rotation included
                 if (!pieces.length) {
                     pieces = F.rects.filter(o => o.w > 12 && o.w <= 205 && o.h > 6 && o.h < 200 && o.y > 100)
                         .map(o => ({ cx: o.x + o.w / 2, w: o.w }));
@@ -1372,7 +1398,7 @@ defineDriver('GLASS STACK', {
                 const top = pieces.length > 1 ? pieces[pieces.length - 2] : null;
                 const topX = top ? top.cx : 200;
                 const topW = top ? top.w : 200;
-                if (level !== prevLevel) { prevLevel = level; prevX = null; }
+                if (level !== prevLevel) { prevLevel = level; prevX = null; waited = 0; }
                 if (tapLevel === level) { prevX = cur.cx; return; }     // tapped already, waiting for the new piece
                 const bal = F.rects.find(o => Math.abs(o.x - 200) < 0.6 && Math.abs(o.y - 74) < 0.6 && Math.abs(o.h - 8) < 0.6);
                 const lean = bal ? bal.w : 0;
@@ -1380,7 +1406,7 @@ defineDriver('GLASS STACK', {
                 const cx0 = Math.max(70, Math.min(330, topX));
                 const x = cur.cx;
                 const target = ctx.target.v;
-                if (level >= target) {
+                if (level >= target || ctx.overBudget()) {
                     // slide it off: tap when the overlap is below 30 % of the narrower piece
                     const w = cur.w, need = Math.min(w, topW) * 0.30;
                     const over = Math.min(x + w / 2, topX + topW / 2) - Math.max(x - w / 2, topX - topW / 2);
@@ -1388,17 +1414,28 @@ defineDriver('GLASS STACK', {
                     prevX = x; return;
                 }
                 if (prevX == null) { prevX = x; return; }
-                // phase from x, branch from the direction of motion, then predict next frame
+                waited++;
+                // phase from x, branch from the direction of motion
                 const s = clamp((x - cx0) / amp, -1, 1);
                 let ph = Math.asin(s);
                 if (x < prevX) ph = Math.PI - ph;
-                const nextX = cx0 + Math.sin(ph + F.dt * sp) * amp;
                 const want = topX + clamp(-lean / 0.78, -6, 6);
-                const dNow = Math.abs(x - want), dNext = Math.abs(nextX - want);
-                const step = amp * sp * F.dt;
-                if (dNow <= dNext && dNow <= step * 0.51 + 0.35) {
+                const dNow = Math.abs(x - want);
+                // scan up to three swings ahead for the frame that samples nearest `want`;
+                // tap now only if this frame is that one (re-planned every frame, so timing
+                // jitter over the wait never matters — the tap always uses the real x)
+                const dt = F.dt, period = 2 * Math.PI / sp, K = Math.min(720, Math.ceil(3 * period / dt));
+                let bestK = 0, bestD = dNow;
+                for (let k = 1; k <= K; k++) {
+                    const d = Math.abs(cx0 + Math.sin(ph + k * dt * sp) * amp - want) + k * 0.0015;
+                    if (d < bestD) { bestD = d; bestK = k; }
+                }
+                // the longer we have waited, the more we accept (never more than half a frame-step)
+                const step = amp * sp * dt;
+                const tol = Math.min(step * 0.51 + 0.35, 1.0 + (waited / K) * step);
+                if (bestK === 0 && dNow <= tol) {
                     input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level;
-                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1));
+                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1), 'after', waited, 'frames');
                 }
                 prevX = x;
             },
@@ -1410,16 +1447,17 @@ defineDriver('GLASS STACK', {
 // ---------------------------------------------------------------- TABLE RUSH
 // Waiter 118 px/s per axis (diagonals are faster), mobs of radius 10–12.6
 // wander or stand. Every frame a receding-horizon search over three-segment
-// key plans (9³ actions, 21 frames) picks the move that reaches the table
-// soonest. Touching a guest costs a glass but grants 1.5 s of invulnerability,
-// and every cleared stage gives a glass back — so the planner spends one hit
-// per stage (keeping two glasses in reserve) as free passage through the crowd.
+// key plans (9³ actions, 0.35 s) picks the move that reaches the table soonest
+// without touching anyone. Touching a guest costs a glass but grants 1.5 s of
+// invulnerability, and every cleared stage gives a glass back — so once the hall
+// is crowded the planner may spend one hit per stage (keeping two glasses in
+// reserve) as passage. In max mode the round ends when the game ends it.
 const TR_ACTS = []; for (let iy = -1; iy <= 1; iy++) for (let ix = -1; ix <= 1; ix++) TR_ACTS.push([ix, iy]);
 defineDriver('TABLE RUSH', {
     kind: 'unbounded', defaultTarget: 15,
     tunables: { safety: { min: 1, max: 9, step: 2, init: 5, explore: 0.2 } },
     make(ctx) {
-        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], lastAct = null, lastMe = null, dying = false, hitsThisStage = 0;
+        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], lastAct = null, lastMe = null, dying = false, hitsThisStage = 0, bestY = 1e9, stuckFrames = 0;
         const setKeys = a => {
             const want = { d: a[0] > 0, a: a[0] < 0, s: a[1] > 0, w: a[1] < 0 };
             for (const k in want) { if (!!keysDown[k] !== want[k]) { input.key(k, want[k]); keysDown[k] = want[k]; } }
@@ -1433,7 +1471,7 @@ defineDriver('TABLE RUSH', {
                 if (!st) { if (F.has('TRAY DOWN') || F.has('STAGE')) setKeys([0, 0]); return; }
                 const lv = +st.m[1];
                 const t = F.t, dt = F.dt;
-                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; hitsThisStage = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - ctx.t0) / 1000).toFixed(1) + 's'); }
+                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; hitsThisStage = 0; bestY = 1e9; stuckFrames = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - ctx.t0) / 1000).toFixed(1) + 's'); }
                 // glasses HUD: arcs at y=25, gold = alive
                 const arcs = F.arcs.filter(o => Math.abs(o.y - 25) < 0.6 && Math.abs(o.r - 7) < 0.6);
                 if (arcs.length === 3) {
@@ -1461,28 +1499,34 @@ defineDriver('TABLE RUSH', {
                 prevMobs = mobs;
                 const target = ctx.target.v;
                 dying = lv > target;
+                // the game collides at m.r (10–12.6) + me.r (12); `safety` is our margin on top
                 const R = 12.6 + 12 + ctx.params.safety;
                 const invLeft0 = Math.max(0, (invUntil - t) / 1000);
-                // a hit costs one glass but buys 1.5 s of walking through the crowd; every
-                // cleared stage gives one glass back, so glasses-1 hits per stage are free
-                const budget0 = dying ? 0 : Math.max(0, glasses - 2 - hitsThisStage);   // never spend the last-but-one glass
-                // three segments of 7 frames over the 9 actions; mob positions precomputed per step
-                const SEG = 7, NSEG = 3, H = SEG * NSEG, spd = 118 * dt;
+                // a hit is worth a glass once the hall is crowded (stage 4+) or the crowd has held
+                // us for most of a second — early stages are crossed clean
+                if (me.y < bestY - 2) { bestY = me.y; stuckFrames = 0; } else stuckFrames++;
+                const stuck = stuckFrames > 0.8 / dt;
+                const budget0 = dying || !(stuck || mobs.length >= 24) ? 0 : Math.max(0, glasses - 2 - hitsThisStage);   // never spend the last-but-one glass
+                // 0.35 s horizon in three segments at the game's own frame step — guests turn
+                // every 0.5–1.8 s, so longer predictions are mostly wrong; only guests that could
+                // possibly be reached in that time take part (the rest cost nothing)
+                const step = dt, H = Math.max(6, Math.round(0.35 / step)), SEG = Math.ceil(H / 3), spd = 118 * step;
+                const reach = 118 * 1.45 * 0.35 + 160;
+                const near = mobs.filter(m => hypot(m.x - me.x, m.y - me.y) < reach);
                 const mx = [], my = [];
-                for (let k = 1; k <= H; k++) { const ax = [], ay = []; for (const m of mobs) { ax.push(m.x + m.vx * dt * k); ay.push(m.y + m.vy * dt * k); } mx.push(ax); my.push(ay); }
+                for (let k = 1; k <= H; k++) { const ax = [], ay = []; for (const m of near) { ax.push(m.x + m.vx * step * k); ay.push(m.y + m.vy * step * k); } mx.push(ax); my.push(ay); }
                 let best = null;
                 const sim = (acts) => {
-                    let x = me.x, y = me.y, cost = 0, inv = invLeft0, budget = budget0, hits = 0;
+                    let x = me.x, y = me.y, cost = 0, inv = invLeft0, budget = budget0;
                     for (let k = 1; k <= H; k++) {
                         const ac = acts[Math.floor((k - 1) / SEG)];
                         x = clamp(x + ac[0] * spd, 20, 380); y = clamp(y + ac[1] * spd, 78, 434);
-                        if (inv > 0) inv -= dt;
+                        if (inv > 0) inv -= step;
                         else {
                             const px = mx[k - 1], py = my[k - 1];
                             for (let i = 0; i < px.length; i++) {
                                 const ddx = px[i] - x, ddy = py[i] - y;
                                 if (ddx * ddx + ddy * ddy < R * R) {
-                                    hits++;
                                     if (dying) return -1000 + k;
                                     if (budget > 0) {
                                         budget--; inv = 1.5; cost += 70;
@@ -1534,7 +1578,9 @@ const panel = {
             + '<button id="pmShow" hidden style="all:unset;cursor:pointer;padding:2px 6px;color:#e6b450;font:11px monospace">▸ PineMini</button>';
         d.body.appendChild(el);
         this.el = el;
-        el.querySelector('#pmToggle').onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
+        const tg = el.querySelector('#pmToggle');
+        tg.onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
+        this.toggle = tg;
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
         // hide collapses to a chip that brings it back — never to nothing
@@ -1548,6 +1594,7 @@ const panel = {
     },
     render() {
         if (!this.el || this.el.querySelector('#pmBody').hidden) return;
+        if (this.toggle) this.toggle.textContent = flow.timer ? 'pause' : 'resume';
         const g = flow.game;
         const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (flow.timer ? flow.state : 'PAUSED') + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
@@ -1556,6 +1603,7 @@ const panel = {
             const L = learn.game(n), top = board.top[n];
             if (!L.plays && !top) continue;
             lines.push((L.plays ? L.plays + '× ' : '   ') + n.padEnd(17) + (L.best ? L.best.txt : '-').padEnd(16) + (top ? ' #1 ' + top.txt : '') + (beaten(n) ? ' ✓' : ''));
+            if (g && g.name === n && isFinite(g.ctx.budgetMs)) lines[lines.length - 1] += '  ⏳' + Math.max(0, Math.round((g.ctx.budgetMs - (now() - g.t0)) / 60000)) + 'm';
         }
         if (hooks.dtCapped > 0.3) lines.push('page speed-up: dt ' + (hooks.dtMean * 1000).toFixed(0) + 'ms (' + Math.round(hooks.dtCapped * 100) + '% at the engines\' 50ms cap)');
         if (flow.err) lines.push('err: ' + flow.err);
@@ -1588,6 +1636,19 @@ const api = {
         if (v == null) delete t[name]; else t[name] = v;
         api.set('targets', t);
         return name + ' → ' + JSON.stringify(targetFor(name));
+    },
+    // everything a driver can see right now, as text — `copy(pineMini.diag())` in the console
+    diag() {
+        const f = api.frame, g = flow.game;
+        const count = arr => { const o = {}; for (const k of arr) o[k] = (o[k] || 0) + 1; return o; };
+        const d = {
+            version: SCRIPT_VERSION, state: flow.state, game: g && g.name, frames: g && g.frames, actedAt: g && g.actedAt, err: flow.err,
+            speed: api.speed(), target: g && g.ctx.target, params: g && g.params,
+            frame: f ? { t: Math.round(f.t), dt: +f.dt.toFixed(4), canvas: f.id, imgs: count(f.imgs.map(o => o.src)), texts: f.texts.map(o => o.s + '@' + Math.round(o.x) + ',' + Math.round(o.y)), rects: f.rects.length, arcs: f.arcs.length, ellipses: f.ellipses.length,
+                sprites: f.imgs.filter(o => !/floor|bg_|logo/.test(o.src)).slice(0, 40).map(o => o.src + '@' + Math.round(o.cx) + ',' + Math.round(o.cy) + ' ' + Math.round(o.w) + 'x' + Math.round(o.h)) } : null,
+            results: flow.results.slice(-8).map(r => r.name + ' ' + r.txt + (r.fast ? ' (fast)' : ''))
+        };
+        return JSON.stringify(d, null, 1);
     },
     // how fast the page's clock is running compared with the engines' own frame budget
     speed() { return { dtMs: +(hooks.dtMean * 1000).toFixed(2), cappedFrames: +(hooks.dtCapped * 100).toFixed(0) + '%', frames: hooks.frames, note: hooks.dtCapped > 0.5 ? 'accelerated: the engines clamp dt to 50ms, so the sim advances in coarse steps' : 'normal' }; },

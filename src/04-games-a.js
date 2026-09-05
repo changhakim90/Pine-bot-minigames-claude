@@ -197,11 +197,15 @@ defineDriver('STIR STOP', {
 // below = shatter (600 ms stun). The gauge is drawn as a fill rect at x=354,
 // so it is read back exactly. 17 taps + DONE inside one frame = one ball
 // per frame; the driver paces balls to reach its target across the 15 s.
+// Every ball costs the game a particle burst and a sound, so balls-per-frame is
+// tuned rather than fixed: too many and the page slows, the engine's dt hits its
+// cap and fewer frames — hence fewer balls — fit in the 15 s.
 defineDriver('ICE CARVING', {
     kind: 'unbounded', defaultTarget: 60,
+    tunables: { perFrame: { min: 2, max: 14, step: 2, init: 6, explore: 0.3 } },
     make(ctx) {
         let count = 0, armedAt = 0, stunUntil = 0;
-        const maxPerFrame = 6;
+        const maxPerFrame = ctx.params.perFrame || 6;
         return {
             frame(F) {
                 const bT = input.el('hh_icTap'), bD = input.el('hh_icDone');
@@ -216,10 +220,14 @@ defineDriver('ICE CARVING', {
                 if (F.t < stunUntil) return;
                 const target = ctx.target.v;
                 const elapsed = 15 - left;
-                const due = Math.min(target, Math.ceil(target * (elapsed + 0.4) / 15));   // pace with a little slack
-                let todo = Math.max(0, due - count);
-                if (left < 1.0) todo = Math.max(0, target - count);                      // finish early rather than late
-                todo = Math.min(todo, maxPerFrame);
+                let todo;
+                if (!isFinite(target)) todo = maxPerFrame;                                   // max mode: flat out
+                else {
+                    const due = Math.min(target, Math.ceil(target * (elapsed + 0.4) / 15));   // pace with a little slack
+                    todo = Math.max(0, due - count);
+                    if (left < 1.0) todo = Math.max(0, target - count);                      // finish early rather than late
+                    todo = Math.min(todo, maxPerFrame);
+                }
                 // gauge = (420 - fy) / 270 * 100 from fillRect(354, fy, 16, 420 - fy)
                 const gr = F.rects.find(o => Math.abs(o.x - 354) < 0.6 && Math.abs(o.w - 16) < 0.6);
                 let gauge = gr ? (420 - gr.y) / 270 * 100 : 0;
@@ -264,7 +272,7 @@ function clPowerDecay(p, dt, frames) { for (let i = 0; i < frames; i++) p = Math
 // Very large targets do cost the game work: it draws a 25 m tick on its minimap for
 // every mark, and one particle per tap.
 defineDriver('CHAMPAGNE LAUNCH', {
-    kind: 'unbounded', defaultTarget: 2000,
+    kind: 'unbounded', defaultTarget: 2000, maxTarget: 20000,
     make(ctx) {
         const m = { worldX: 0, vel: 0, power: 0, angle: 12, hold: false, fired: false, launchX: 0, R: 0, pFire: 0 };
         let run = false, dtAvg = 1 / 60, planned = null;
@@ -431,7 +439,7 @@ defineDriver('ORDER UP!', {
                 let seq = Array.isArray(W.__ouSeq) && W.__ouRound === round ? W.__ouSeq.slice() : (Array.isArray(W.__ouSeq) && W.__ouSeq.length === 3 + round ? W.__ouSeq.slice() : seen);
                 if (!seq.length) return;
                 doneRound = round;
-                if (round >= ctx.target.v) {
+                if (round >= ctx.target.v || ctx.overBudget()) {
                     const wrong = (seq[0] + 1) % 10;
                     const p = OU_BTN(wrong); input.down(c, p.x, p.y, c); ctx.acted(); failed = true;
                     ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')');

@@ -76,14 +76,20 @@ model against what was drawn (Stir Stop checks its temperature against the
 HUD colour every frame and counts mismatches). A driver declares:
 
 - `kind`: `precision` (error, floor 0), `capped` (a game-imposed ceiling) or
-  `unbounded` (the driver picks a target: the board's #1 + margin, or a default);
+  `unbounded` (no ceiling in the game; in max mode `ctx.target.v` is Infinity
+  and the round runs to the game's end or `ctx.overBudget()`, when a driver
+  that can end a round on purpose must; `maxTarget` gives a finite plan where
+  one is needed, e.g. Champagne's power);
 - optional `tunables` — small ranges the scheduler explores between plays and
   scores by result (`tune` in `03-flow`);
 - `make(ctx) → { frame(F), tick(), stop(), result(m, txt) }`, where `result`
   is where calibration is learned (`learn.ema`).
 
 Never let a driver act on a guess: if the frame does not show what it needs,
-it waits.
+it waits — but it must not depend on artwork having loaded: read the shapes
+the game draws when a sprite is missing (rects, discs, ellipses, geometry).
+Sprite extents in a `Frame` are along the screen axes, rotation included.
+`pineMini.diag()` is what a user can paste back when a game misbehaves.
 
 ## Learning
 

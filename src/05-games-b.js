@@ -42,7 +42,7 @@ defineDriver('WHERE IS MY SHOT?', {
                 }
                 picked = round;
                 let idx = shotIdx >= 0 ? shotIdx : 0;
-                if (round >= ctx.target.v) { idx = (idx + 1) % covers.length; failed = true; ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')'); }
+                if (round >= ctx.target.v || ctx.overBudget()) { idx = (idx + 1) % covers.length; failed = true; ctx.log('KO on purpose at round', round, '(target', ctx.target.v + ')'); }
                 else if (shotIdx < 0) ctx.log('lost the shot this round — guessing');
                 input.down(c, covers[idx].cx, 288, c);
                 ctx.acted();
@@ -160,9 +160,9 @@ defineDriver('TIP CATCH', {
 });
 
 // ---------------------------------------------------------------- FLY SWAT
-// A tap kills the nearest fly within 32 px. Flies are drawn 34 px wide, so
-// every fly on screen gets one pointerdown at its own centre, every frame —
-// nothing ever lands on the fruit.
+// A tap kills the nearest fly within 32 px. Every fly on screen (fs_fly1/2,
+// drawn rotated to its heading) gets one pointerdown at its own centre, every
+// frame — nothing ever lands on the fruit.
 defineDriver('FLY SWAT', {
     kind: 'capped',
     make(ctx) {
@@ -173,7 +173,7 @@ defineDriver('FLY SWAT', {
                 if (!c || F.has('TIME UP!')) return;
                 if (!F.text(/^x \d+$/, { x: 14, y: 38, d: 4 })) return;      // HUD only in 'play'
                 for (const o of F.imgs) {
-                    if (!/^fs_fly[12]$/.test(o.src) || Math.abs(o.w - 34) > 0.6) continue;
+                    if (!/^fs_fly[12]$/.test(o.src)) continue;      // the intro's big fly is fs_bigfly
                     input.down(c, o.cx, o.cy, c); shots++; ctx.acted();
                 }
             },
@@ -184,13 +184,16 @@ defineDriver('FLY SWAT', {
 
 // ---------------------------------------------------------------- GLASS STACK
 // The swinging piece is drawn at cx0 + sin(ph)·amp with known amp/speed per
-// level, so its next position is predicted exactly from this frame's x.
-// Tap when the piece crosses the point that also cancels the tray's lean
-// (read back from the BALANCE bar). At the target height, miss on purpose.
+// level, so every future frame's position follows from this frame's x. The
+// piece only exists at discrete frame positions — up to 15 px apart when a
+// page-speed extension pins dt at 50 ms — so rather than tapping at the first
+// crossing, the driver looks a few swings ahead for the sampled position that
+// lands nearest the spot which also cancels the tray's lean (read back from
+// the BALANCE bar), and taps on that frame. At the target height, miss on purpose.
 defineDriver('GLASS STACK', {
     kind: 'unbounded', defaultTarget: 40,
     make(ctx) {
-        let prevX = null, prevLevel = -1, ended = false, tapped = 0, tapLevel = -1;
+        let prevX = null, prevLevel = -1, ended = false, tapped = 0, tapLevel = -1, waited = 0;
         return {
             frame(F) {
                 const c = input.el('hh_gscv');
@@ -201,7 +204,7 @@ defineDriver('GLASS STACK', {
                 // Pieces by sprite name; when a piece image is missing the game draws
                 // fillRect(x - w/2, y, w, h) instead, so read those in the same order.
                 let pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src))
-                    .map(o => ({ cx: o.cx, w: Math.min(o.w, o.h) }));
+                    .map(o => ({ cx: o.cx, w: o.w }));      // o.w is the on-screen width, rotation included
                 if (!pieces.length) {
                     pieces = F.rects.filter(o => o.w > 12 && o.w <= 205 && o.h > 6 && o.h < 200 && o.y > 100)
                         .map(o => ({ cx: o.x + o.w / 2, w: o.w }));
@@ -212,7 +215,7 @@ defineDriver('GLASS STACK', {
                 const top = pieces.length > 1 ? pieces[pieces.length - 2] : null;
                 const topX = top ? top.cx : 200;
                 const topW = top ? top.w : 200;
-                if (level !== prevLevel) { prevLevel = level; prevX = null; }
+                if (level !== prevLevel) { prevLevel = level; prevX = null; waited = 0; }
                 if (tapLevel === level) { prevX = cur.cx; return; }     // tapped already, waiting for the new piece
                 const bal = F.rects.find(o => Math.abs(o.x - 200) < 0.6 && Math.abs(o.y - 74) < 0.6 && Math.abs(o.h - 8) < 0.6);
                 const lean = bal ? bal.w : 0;
@@ -220,7 +223,7 @@ defineDriver('GLASS STACK', {
                 const cx0 = Math.max(70, Math.min(330, topX));
                 const x = cur.cx;
                 const target = ctx.target.v;
-                if (level >= target) {
+                if (level >= target || ctx.overBudget()) {
                     // slide it off: tap when the overlap is below 30 % of the narrower piece
                     const w = cur.w, need = Math.min(w, topW) * 0.30;
                     const over = Math.min(x + w / 2, topX + topW / 2) - Math.max(x - w / 2, topX - topW / 2);
@@ -228,17 +231,28 @@ defineDriver('GLASS STACK', {
                     prevX = x; return;
                 }
                 if (prevX == null) { prevX = x; return; }
-                // phase from x, branch from the direction of motion, then predict next frame
+                waited++;
+                // phase from x, branch from the direction of motion
                 const s = clamp((x - cx0) / amp, -1, 1);
                 let ph = Math.asin(s);
                 if (x < prevX) ph = Math.PI - ph;
-                const nextX = cx0 + Math.sin(ph + F.dt * sp) * amp;
                 const want = topX + clamp(-lean / 0.78, -6, 6);
-                const dNow = Math.abs(x - want), dNext = Math.abs(nextX - want);
-                const step = amp * sp * F.dt;
-                if (dNow <= dNext && dNow <= step * 0.51 + 0.35) {
+                const dNow = Math.abs(x - want);
+                // scan up to three swings ahead for the frame that samples nearest `want`;
+                // tap now only if this frame is that one (re-planned every frame, so timing
+                // jitter over the wait never matters — the tap always uses the real x)
+                const dt = F.dt, period = 2 * Math.PI / sp, K = Math.min(720, Math.ceil(3 * period / dt));
+                let bestK = 0, bestD = dNow;
+                for (let k = 1; k <= K; k++) {
+                    const d = Math.abs(cx0 + Math.sin(ph + k * dt * sp) * amp - want) + k * 0.0015;
+                    if (d < bestD) { bestD = d; bestK = k; }
+                }
+                // the longer we have waited, the more we accept (never more than half a frame-step)
+                const step = amp * sp * dt;
+                const tol = Math.min(step * 0.51 + 0.35, 1.0 + (waited / K) * step);
+                if (bestK === 0 && dNow <= tol) {
                     input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level;
-                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1));
+                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1), 'after', waited, 'frames');
                 }
                 prevX = x;
             },
@@ -250,16 +264,17 @@ defineDriver('GLASS STACK', {
 // ---------------------------------------------------------------- TABLE RUSH
 // Waiter 118 px/s per axis (diagonals are faster), mobs of radius 10–12.6
 // wander or stand. Every frame a receding-horizon search over three-segment
-// key plans (9³ actions, 21 frames) picks the move that reaches the table
-// soonest. Touching a guest costs a glass but grants 1.5 s of invulnerability,
-// and every cleared stage gives a glass back — so the planner spends one hit
-// per stage (keeping two glasses in reserve) as free passage through the crowd.
+// key plans (9³ actions, 0.35 s) picks the move that reaches the table soonest
+// without touching anyone. Touching a guest costs a glass but grants 1.5 s of
+// invulnerability, and every cleared stage gives a glass back — so once the hall
+// is crowded the planner may spend one hit per stage (keeping two glasses in
+// reserve) as passage. In max mode the round ends when the game ends it.
 const TR_ACTS = []; for (let iy = -1; iy <= 1; iy++) for (let ix = -1; ix <= 1; ix++) TR_ACTS.push([ix, iy]);
 defineDriver('TABLE RUSH', {
     kind: 'unbounded', defaultTarget: 15,
     tunables: { safety: { min: 1, max: 9, step: 2, init: 5, explore: 0.2 } },
     make(ctx) {
-        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], lastAct = null, lastMe = null, dying = false, hitsThisStage = 0;
+        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], lastAct = null, lastMe = null, dying = false, hitsThisStage = 0, bestY = 1e9, stuckFrames = 0;
         const setKeys = a => {
             const want = { d: a[0] > 0, a: a[0] < 0, s: a[1] > 0, w: a[1] < 0 };
             for (const k in want) { if (!!keysDown[k] !== want[k]) { input.key(k, want[k]); keysDown[k] = want[k]; } }
@@ -273,7 +288,7 @@ defineDriver('TABLE RUSH', {
                 if (!st) { if (F.has('TRAY DOWN') || F.has('STAGE')) setKeys([0, 0]); return; }
                 const lv = +st.m[1];
                 const t = F.t, dt = F.dt;
-                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; hitsThisStage = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - ctx.t0) / 1000).toFixed(1) + 's'); }
+                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; hitsThisStage = 0; bestY = 1e9; stuckFrames = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - ctx.t0) / 1000).toFixed(1) + 's'); }
                 // glasses HUD: arcs at y=25, gold = alive
                 const arcs = F.arcs.filter(o => Math.abs(o.y - 25) < 0.6 && Math.abs(o.r - 7) < 0.6);
                 if (arcs.length === 3) {
@@ -301,28 +316,34 @@ defineDriver('TABLE RUSH', {
                 prevMobs = mobs;
                 const target = ctx.target.v;
                 dying = lv > target;
+                // the game collides at m.r (10–12.6) + me.r (12); `safety` is our margin on top
                 const R = 12.6 + 12 + ctx.params.safety;
                 const invLeft0 = Math.max(0, (invUntil - t) / 1000);
-                // a hit costs one glass but buys 1.5 s of walking through the crowd; every
-                // cleared stage gives one glass back, so glasses-1 hits per stage are free
-                const budget0 = dying ? 0 : Math.max(0, glasses - 2 - hitsThisStage);   // never spend the last-but-one glass
-                // three segments of 7 frames over the 9 actions; mob positions precomputed per step
-                const SEG = 7, NSEG = 3, H = SEG * NSEG, spd = 118 * dt;
+                // a hit is worth a glass once the hall is crowded (stage 4+) or the crowd has held
+                // us for most of a second — early stages are crossed clean
+                if (me.y < bestY - 2) { bestY = me.y; stuckFrames = 0; } else stuckFrames++;
+                const stuck = stuckFrames > 0.8 / dt;
+                const budget0 = dying || !(stuck || mobs.length >= 24) ? 0 : Math.max(0, glasses - 2 - hitsThisStage);   // never spend the last-but-one glass
+                // 0.35 s horizon in three segments at the game's own frame step — guests turn
+                // every 0.5–1.8 s, so longer predictions are mostly wrong; only guests that could
+                // possibly be reached in that time take part (the rest cost nothing)
+                const step = dt, H = Math.max(6, Math.round(0.35 / step)), SEG = Math.ceil(H / 3), spd = 118 * step;
+                const reach = 118 * 1.45 * 0.35 + 160;
+                const near = mobs.filter(m => hypot(m.x - me.x, m.y - me.y) < reach);
                 const mx = [], my = [];
-                for (let k = 1; k <= H; k++) { const ax = [], ay = []; for (const m of mobs) { ax.push(m.x + m.vx * dt * k); ay.push(m.y + m.vy * dt * k); } mx.push(ax); my.push(ay); }
+                for (let k = 1; k <= H; k++) { const ax = [], ay = []; for (const m of near) { ax.push(m.x + m.vx * step * k); ay.push(m.y + m.vy * step * k); } mx.push(ax); my.push(ay); }
                 let best = null;
                 const sim = (acts) => {
-                    let x = me.x, y = me.y, cost = 0, inv = invLeft0, budget = budget0, hits = 0;
+                    let x = me.x, y = me.y, cost = 0, inv = invLeft0, budget = budget0;
                     for (let k = 1; k <= H; k++) {
                         const ac = acts[Math.floor((k - 1) / SEG)];
                         x = clamp(x + ac[0] * spd, 20, 380); y = clamp(y + ac[1] * spd, 78, 434);
-                        if (inv > 0) inv -= dt;
+                        if (inv > 0) inv -= step;
                         else {
                             const px = mx[k - 1], py = my[k - 1];
                             for (let i = 0; i < px.length; i++) {
                                 const ddx = px[i] - x, ddy = py[i] - y;
                                 if (ddx * ddx + ddy * ddy < R * R) {
-                                    hits++;
                                     if (dying) return -1000 + k;
                                     if (budget > 0) {
                                         budget--; inv = 1.5; cost += 70;

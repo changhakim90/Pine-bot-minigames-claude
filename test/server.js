@@ -49,6 +49,10 @@ function placeholder(name) {
     let w = 640, h = 640;
     if (/deco|strip|ribbon/.test(name)) { w = 900; h = 120; }
     if (/bg_|logo/.test(name)) { w = 700; h = 420; }
+    if (/^gs_plate|^gs_tray/.test(name)) { w = 640; h = 160; }          // flat, like the real plates
+    if (/^gs_(wine|coupe|shot|highball|martini|rocks|pick)/.test(name)) { w = 260; h = 640; }   // tall glasses (some drawn rotated)
+    if (/^dg_(waiter|cust)|^tc_jar|^fs_fly|^ws_cover/.test(name)) { w = 400; h = 640; }
+    if (/^ws_shot/.test(name)) { w = 400; h = 520; }
     const key = w + 'x' + h;
     if (!cache.has(key)) cache.set(key, png(w, h, [40, 90, 200]));
     return cache.get(key);

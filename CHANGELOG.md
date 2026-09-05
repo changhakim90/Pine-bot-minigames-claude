@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.4.0 — max mode; Glass Stack and Table Rush fixed for real (2026-09-05)
+
+**Max mode (default).** Every game now plays for the most a round allows.
+Precision and capped games already did; the endless ones no longer stop at a
+number: Order Up!, Where Is My Shot? and Glass Stack run until a round budget
+(`roundBudgetMin`, 12 min) is spent and then end the round on purpose so the
+record is as high as the time allowed; Table Rush plays until the game ends
+it; Ice Carving makes as many balls per frame as the page can take
+(2,250 in 15 s on the reference page, tuned); Champagne plans for 20,000 m.
+`pineMini.target(game, n)` still pins a game to a number, `set('max', false)`
+restores board-#1-plus-margin targeting.
+
+**Glass Stack** — two real bugs:
+- sprite extents were measured along the sprite's own axes, so a piece the
+  game draws rotated by −90° (shot glass, pick) reported its height as its
+  width; extents are now along the screen axes (unit-tested);
+- the piece only exists at discrete frame positions, and with a page-speed
+  extension those are ~15 px apart; tapping at the first crossing left errors
+  the tray could not absorb. The driver now looks up to three swings ahead for
+  the frame that samples nearest the lean-cancelling spot and taps on that
+  frame: 40 stacked with placement errors of 0.1–1.6 px and the lean held at
+  zero (131 s).
+
+**Table Rush** — plays with its glasses instead of spending them: the hit
+budget only opens once the hall is crowded (stage 4+) or the crowd has held
+the waiter for most of a second, guests out of reach are pruned from the
+search (the 52-guest halls no longer cost frames), and the horizon is a
+time (0.35 s) rather than a frame count so a speed-up does not shorten it.
+Stage 15 in 92 s.
+
+**Also**
+- `copy(pineMini.diag())` — everything a driver sees right now (sprites with
+  positions, HUD texts, frame timing, target, recent results) as text on the
+  clipboard, for reporting a game that misbehaves;
+- panel: the pause button reads *resume* while paused; a ⏳ shows the budget
+  left on an endless round;
+- test art now has the real sprites' shapes (flat plates, tall glasses and
+  people), so rotation and aspect handling are exercised end to end.
+
 ## 0.3.0 — sprite names survive keying; nothing waits on artwork (2026-09-05)
 
 **The bug behind "the bot isn't clicking".** The game keys the white background

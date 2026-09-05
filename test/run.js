@@ -51,10 +51,18 @@ test('canvas hooks record absolute coordinates, colours and image names per fram
     eq(got.rgb(r.fs), [151, 203, 255]);
     const fly = got.img('fs_fly1')[0];
     assert.ok(fly, 'keyed offscreen canvas carries the image name');
-    assert.ok(Math.abs(fly.cx - 120) < 1e-9 && Math.abs(fly.cy - 200) < 1e-9 && Math.abs(fly.w - 34) < 1e-9, 'rotated draw centre/width');
+    // extents are along the screen axes: a 34 px sprite rotated 0.5 rad spans 34·(cos+sin)
+    const span = 34 * (Math.cos(0.5) + Math.sin(0.5));
+    assert.ok(Math.abs(fly.cx - 120) < 1e-9 && Math.abs(fly.cy - 200) < 1e-9 && Math.abs(fly.w - span) < 1e-9 && Math.abs(fly.h - span) < 1e-9, 'rotated draw centre/extents: ' + fly.w);
+    // a piece drawn after rotate(-90°) with swapped dw/dh (Glass Stack's shot glass) is as wide as its dh
     const tx = got.text(/^ROUND (\d+)$/, { x: 12, y: 68, d: 1 }); assert.ok(tx && tx.m[1] === '3', 'translated text position');
+
     assert.strictEqual(got.ellipses.length, 1);
     eq(got.rgb('#97cbff'), [151, 203, 255]);
+    // a piece drawn after rotate(-90°) with swapped dw/dh (Glass Stack's shot glass) is as wide on screen as its dh
+    env.frame(1016, t => { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.save(); ctx.translate(300, 300); ctx.rotate(-Math.PI / 2); ctx.drawImage(off, -60 / 2, -20 / 2, 60, 20); ctx.restore(); });
+    const rot = got.img('fs_fly1')[0];
+    assert.ok(rot && Math.abs(rot.w - 20) < 1e-9 && Math.abs(rot.h - 60) < 1e-9 && Math.abs(rot.cx - 300) < 1e-9, 'rotated -90° piece: screen width is dh: ' + (rot && rot.w + 'x' + rot.h));
 });
 
 test('blind pour: surface → ml is exact and the release rule aims target − tail', () => {
@@ -139,6 +147,9 @@ test('order up: POS button centres', () => {
 test('scheduler: targets, beaten, wantsPlay and the tuner stay inside their ranges', () => {
     const pm = makeEnv().window.pineMini;
     pm.board.top['ORDER UP!'] = { v: 20, low: false, txt: 'ROUND 20 KO' };
+    assert.strictEqual(pm.targetFor('ORDER UP!').v, Infinity, 'max mode: no number to stop at');
+    assert.strictEqual(pm.targetFor('CHAMPAGNE LAUNCH').v, 20000, 'max mode: champagne plans for a big finite distance');
+    pm.config.max = false;
     assert.strictEqual(pm.targetFor('ORDER UP!').v, 22, 'board #1 + margin');
     assert.strictEqual(pm.targetFor('BLIND POUR').v, 0);
     assert.strictEqual(pm.wantsPlay('ORDER UP!'), true);

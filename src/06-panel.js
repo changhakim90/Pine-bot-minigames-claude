@@ -14,7 +14,9 @@ const panel = {
             + '<button id="pmShow" hidden style="all:unset;cursor:pointer;padding:2px 6px;color:#e6b450;font:11px monospace">▸ PineMini</button>';
         d.body.appendChild(el);
         this.el = el;
-        el.querySelector('#pmToggle').onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
+        const tg = el.querySelector('#pmToggle');
+        tg.onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
+        this.toggle = tg;
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
         // hide collapses to a chip that brings it back — never to nothing
@@ -28,6 +30,7 @@ const panel = {
     },
     render() {
         if (!this.el || this.el.querySelector('#pmBody').hidden) return;
+        if (this.toggle) this.toggle.textContent = flow.timer ? 'pause' : 'resume';
         const g = flow.game;
         const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (flow.timer ? flow.state : 'PAUSED') + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
@@ -36,6 +39,7 @@ const panel = {
             const L = learn.game(n), top = board.top[n];
             if (!L.plays && !top) continue;
             lines.push((L.plays ? L.plays + '× ' : '   ') + n.padEnd(17) + (L.best ? L.best.txt : '-').padEnd(16) + (top ? ' #1 ' + top.txt : '') + (beaten(n) ? ' ✓' : ''));
+            if (g && g.name === n && isFinite(g.ctx.budgetMs)) lines[lines.length - 1] += '  ⏳' + Math.max(0, Math.round((g.ctx.budgetMs - (now() - g.t0)) / 60000)) + 'm';
         }
         if (hooks.dtCapped > 0.3) lines.push('page speed-up: dt ' + (hooks.dtMean * 1000).toFixed(0) + 'ms (' + Math.round(hooks.dtCapped * 100) + '% at the engines\' 50ms cap)');
         if (flow.err) lines.push('err: ' + flow.err);
@@ -68,6 +72,19 @@ const api = {
         if (v == null) delete t[name]; else t[name] = v;
         api.set('targets', t);
         return name + ' → ' + JSON.stringify(targetFor(name));
+    },
+    // everything a driver can see right now, as text — `copy(pineMini.diag())` in the console
+    diag() {
+        const f = api.frame, g = flow.game;
+        const count = arr => { const o = {}; for (const k of arr) o[k] = (o[k] || 0) + 1; return o; };
+        const d = {
+            version: SCRIPT_VERSION, state: flow.state, game: g && g.name, frames: g && g.frames, actedAt: g && g.actedAt, err: flow.err,
+            speed: api.speed(), target: g && g.ctx.target, params: g && g.params,
+            frame: f ? { t: Math.round(f.t), dt: +f.dt.toFixed(4), canvas: f.id, imgs: count(f.imgs.map(o => o.src)), texts: f.texts.map(o => o.s + '@' + Math.round(o.x) + ',' + Math.round(o.y)), rects: f.rects.length, arcs: f.arcs.length, ellipses: f.ellipses.length,
+                sprites: f.imgs.filter(o => !/floor|bg_|logo/.test(o.src)).slice(0, 40).map(o => o.src + '@' + Math.round(o.cx) + ',' + Math.round(o.cy) + ' ' + Math.round(o.w) + 'x' + Math.round(o.h)) } : null,
+            results: flow.results.slice(-8).map(r => r.name + ' ' + r.txt + (r.fast ? ' (fast)' : ''))
+        };
+        return JSON.stringify(d, null, 1);
     },
     // how fast the page's clock is running compared with the engines' own frame budget
     speed() { return { dtMs: +(hooks.dtMean * 1000).toFixed(2), cappedFrames: +(hooks.dtCapped * 100).toFixed(0) + '%', frames: hooks.frames, note: hooks.dtCapped > 0.5 ? 'accelerated: the engines clamp dt to 50ms, so the sim advances in coarse steps' : 'normal' }; },
