@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.4 — Glass Stack rewritten stateless (2026-09-05)
+
+Live diag showed Glass Stack frozen at a level (`waited: 0`, `prevX` stuck): the
+crossing/`prevX` logic never got two consecutive good frames on the live build —
+a missing-HUD frame or a canvas shake kept resetting it. Replaced the whole
+frame-to-frame machinery with a stateless proximity tap: the piece spawns over
+the previous top and swings through it, so it taps whenever the piece is within
+one frame-step of the lean-cancelling point. No cross-frame state to desync, and
+a retry if a tap ever fails to register — it cannot sit at a level tapping
+nothing. state() reports curX/want/dx/lean.
+
 ## 0.5.3 — Glass Stack cannot stall; max-mode test path; richer diag (2026-09-05)
 
 - Glass Stack now guarantees a placement: it taps at the swing crossing as

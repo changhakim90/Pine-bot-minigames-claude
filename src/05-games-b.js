@@ -206,66 +206,50 @@ defineDriver('FLY SWAT', {
 defineDriver('GLASS STACK', {
     kind: 'unbounded', defaultTarget: 40,
     make(ctx) {
-        let prevX = null, prevLevel = -1, ended = false, tapped = 0, tapLevel = -1, waited = 0, xLo = 1e9, xHi = -1e9, lastX = 0, lastWant = 0, lastLean = 0;
+        let ended = false, tapped = 0, tapLevel = -1, seenLevel = 0, sinceTap = 0, lastX = 0, lastWant = 0, lastLean = 0;
         return {
             frame(F) {
                 const c = input.el('hh_gscv');
                 if (!c || ended) return;
-                const lv = F.text(/^(\d+)$/, { x: 200, y: 42, d: 4 });
-                if (!lv || !F.has('STACKED')) { prevX = null; return; }
-                ctx.alive();                    // waiting for the swing to line up is not a stall
+                const lv = F.text(/^(\d+)$/, { x: 200, y: 42, d: 9 });     // level counter (canvas may shake a few px)
+                if (!lv) return;
                 const level = +lv.m[1];
-                // Pieces by sprite name; when a piece image is missing the game draws
-                // fillRect(x - w/2, y, w, h) instead, so read those in the same order.
-                let pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src))
-                    .map(o => ({ cx: o.cx, w: o.w }));      // o.w is the on-screen width, rotation included
-                if (!pieces.length) {
-                    pieces = F.rects.filter(o => o.w > 12 && o.w <= 205 && o.h > 6 && o.h < 200 && o.y > 100)
-                        .map(o => ({ cx: o.x + o.w / 2, w: o.w }));
-                    if (pieces.length) pieces.shift();      // the tray is drawn first
-                }
+                // pieces by sprite name; the game falls back to fillRect when a sprite is missing
+                let pieces = F.imgs.filter(o => /^gs_/.test(o.src) && !/^gs_(tray|hand|logo)$/.test(o.src)).map(o => ({ cx: o.cx, w: o.w }));
+                if (!pieces.length) { pieces = F.rects.filter(o => o.w > 12 && o.w <= 205 && o.h > 6 && o.h < 200 && o.y > 100).map(o => ({ cx: o.x + o.w / 2, w: o.w })); if (pieces.length) pieces.shift(); }
                 if (!pieces.length) return;
+                ctx.alive();
                 const cur = pieces[pieces.length - 1];
                 const top = pieces.length > 1 ? pieces[pieces.length - 2] : null;
-                const topX = top ? top.cx : 200;
-                const topW = top ? top.w : 200;
-                if (level !== prevLevel) { prevLevel = level; prevX = null; waited = 0; xLo = 1e9; xHi = -1e9; }
-                if (tapLevel === level) { prevX = cur.cx; return; }     // tapped already, waiting for the new piece
-                const bal = F.rects.find(o => Math.abs(o.x - 200) < 0.6 && Math.abs(o.y - 74) < 0.6 && Math.abs(o.h - 8) < 0.6);
+                const topX = top ? top.cx : 200, topW = top ? top.w : 200;
+                // once per placed level; if a tap somehow did not register, retry after ~1.2 s
+                if (level !== seenLevel) { seenLevel = level; sinceTap = 0; }
+                if (tapLevel === level) { sinceTap += (F.dt > 0.0005 ? F.dt : 0.0042); if (sinceTap > 1.2) tapLevel = -1; return; }
+                const bal = F.rects.find(o => Math.abs(o.x - 200) < 1 && Math.abs(o.y - 74) < 1 && Math.abs(o.h - 8) < 1);
                 const lean = bal ? bal.w : 0;
-                const amp = Math.min(150, 80 + level * 3.5), sp = 1.03 + level * 0.06;
-                const cx0 = Math.max(70, Math.min(330, topX));
-                const x = cur.cx;
+                const x = cur.cx, want = topX + clamp(-lean / 0.78, -6, 6);
+                lastX = x; lastWant = want; lastLean = lean;
                 const target = ctx.target.v;
-                if (level >= target || ctx.overBudget()) {
-                    // slide it off: tap when the overlap is below 30 % of the narrower piece
+                if ((isFinite(target) && level >= target) || safe(() => ctx.overBudget(), false)) {
+                    // deliberate finish (a pinned target): tap when the overlap is too small to hold
                     const w = cur.w, need = Math.min(w, topW) * 0.30;
                     const over = Math.min(x + w / 2, topX + topW / 2) - Math.max(x - w / 2, topX - topW / 2);
                     if (over < need - 1) { input.down(c, 200, 240, c); ctx.acted(); tapLevel = level; ended = true; ctx.log('slid off on purpose at', level); }
-                    prevX = x; return;
+                    return;
                 }
-                if (prevX == null) { prevX = x; xLo = xHi = x; return; }
-                waited++;
-                if (x < xLo) xLo = x;
-                if (x > xHi) xHi = x;
-                const want = topX + clamp(-lean / 0.78, -6, 6);
-                lastX = x; lastWant = want; lastLean = lean;
-                // Primary: tap the frame the swing crosses `want` (the lean-cancelling spot) —
-                // precise to one frame-step at any refresh. Fallback: if no crossing has fired
-                // for ~2 s (some live builds sample the swing so it never straddles `want`
-                // cleanly), tap at the nearest approach so the driver can never stall at a level.
-                const secs = waited * (F.dt > 0.0005 ? F.dt : 0.0042);
-                const amp2 = Math.max(1, (xHi - xLo) / 2);
-                const crossed = (x - want) * (prevX - want) <= 0 && x !== prevX;
-                const nearest = secs > 2 && Math.abs(x - want) <= Math.abs(prevX - want) && Math.abs(x - want) < amp2 * 0.08;
-                if (crossed || nearest) {
-                    input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level;
-                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1), 'after', waited, 'frames', crossed ? 'cross' : 'nearest');
+                // Stateless placement: the piece swings through `want` every pass and spawns
+                // right over it, so tap whenever it is within one frame-step of `want`. No
+                // frame-to-frame state to desync — a missing HUD frame or a canvas shake cannot
+                // stall it (which is what left it frozen at a level on the live build).
+                const amp = Math.min(150, 80 + level * 3.5), sp = 1.03 + level * 0.06;
+                const step = Math.max(2, (F.dt > 0.0005 ? F.dt : 0.05) * amp * sp);
+                if (Math.abs(x - want) <= step * 0.6 + 1.2) {
+                    input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level; sinceTap = 0;
+                    if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1));
                 }
-                prevX = x;
             },
             result(m) { ctx.log('stacked', m && m.v, 'taps', tapped, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max'); },
-            state() { return { level: prevLevel, tapped, tapLevel, waited, curX: Math.round(lastX), want: Math.round(lastWant), prevX: prevX == null ? null : Math.round(prevX), swing: [Math.round(xLo), Math.round(xHi)], lean: +lastLean.toFixed(1), over: safe(() => ctx.overBudget(), null), targetInf: !isFinite(ctx.target.v) }; }
+            state() { return { level: seenLevel, tapped, tapLevel, curX: Math.round(lastX), want: Math.round(lastWant), dx: Math.round(lastX - lastWant), lean: +lastLean.toFixed(1), over: safe(() => ctx.overBudget(), null), targetInf: !isFinite(ctx.target.v) }; }
         };
     }
 });
