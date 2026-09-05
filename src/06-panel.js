@@ -15,7 +15,7 @@ const panel = {
         d.body.appendChild(el);
         this.el = el;
         const tg = el.querySelector('#pmToggle');
-        tg.onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
+        tg.onclick = () => { if (!flow.timer) flow.start(); else if (flow.paused) flow.resume(); else flow.pause(); this.render(); };
         this.toggle = tg;
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
@@ -30,9 +30,9 @@ const panel = {
     },
     render() {
         if (!this.el || this.el.querySelector('#pmBody').hidden) return;
-        if (this.toggle) this.toggle.textContent = flow.timer ? 'pause' : 'resume';
+        if (this.toggle) this.toggle.textContent = (flow.timer && !flow.paused) ? 'pause' : 'resume';
         const g = flow.game;
-        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (flow.timer ? flow.state : 'PAUSED') + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
+        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (!flow.timer ? 'STOPPED' : flow.paused ? 'PAUSED' : flow.state) + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
         if (last) lines.push('last: ' + last.name + ' → ' + last.txt + (last.best ? ' ★' : ''));
         for (const n of config.games) {
@@ -53,6 +53,8 @@ const api = {
     config, learn, board, flow, drivers, hooks, input,
     start() { flow.start(); return 'started'; },
     stop() { flow.stop(); return 'stopped'; },
+    pause() { flow.pause(); return flow.paused ? 'paused' : 'not running'; },
+    resume() { flow.resume(); return 'resumed'; },
     skip() { if (flow.game) { log('skipping', flow.game.name); flow.endGame(); } const ok = input.el('hh_rrDone'); const bb = input.el('hh_backBtn'); if (ok && input.visible(input.el('hh_roundResult'))) input.click(ok); else if (bb && !bb.classList.contains('hidden')) input.click(bb); flow.set('hub'); return 'skipped'; },
     play(name) { name = String(name || '').toUpperCase(); if (!drivers[name]) return 'unknown game: ' + name; flow.queue.unshift(name); if (!flow.timer) flow.start(); return 'queued ' + name; },
     set(k, v) { config[k] = v; store.set('config', Object.assign(store.get('config', {}), { [k]: v })); return config; },

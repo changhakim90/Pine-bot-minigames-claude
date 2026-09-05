@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pine & Co Minigame Bot
 // @namespace    https://pineandco.online/
-// @version      0.4.1
+// @version      0.4.2
 // @description  Autonomous record-chasing player for the Pine & Co "Bartender's Happy Hour" mini games. Watches the game's own canvas draw calls, drives every game with frame-exact synthetic input, plays the whole set on its own, tunes itself from its results and never submits a name to the leaderboard.
 // @author       you
 // @match        https://pineandco.online/*
@@ -42,7 +42,7 @@
  * ===================================================================== */
 (function () {
 'use strict';
-const SCRIPT_VERSION = '0.4.1';
+const SCRIPT_VERSION = '0.4.2';
 const TAG = '[PineMini]';
 const NS = 'pineMini_';
 const W = (typeof window !== 'undefined') ? window : globalThis;
@@ -563,6 +563,8 @@ function wantsPlay(name) {
 // ---------------------------------------------------------------- flow
 const flow = {
     state: 'idle',       // idle | title | hub | howto | game | result | stopped
+    paused: false,       // frozen in place: no ticking, no input, but the round is kept
+    pausedAt: 0,
     since: 0,
     game: null,          // {name, driver, t0, params, frames}
     queue: [],
@@ -588,6 +590,10 @@ const flow = {
         this.state = 'stopped';
         log('stopped');
     },
+    // freeze without abandoning the round; timers are shifted on resume so a paused
+    // stretch does not count against how-to / result waits
+    pause() { if (!this.timer || this.paused) return; this.paused = true; this.pausedAt = now(); log('paused'); },
+    resume() { if (!this.paused) { if (!this.timer) this.start(); return; } const d = now() - this.pausedAt; this.since += d; if (this.game) this.game.t0 += d; this.paused = false; log('resumed'); },
     set(state) { if (state !== this.state) { this.state = state; this.since = now(); if (config.verbose) log('→', state); } },
     age() { return now() - this.since; },
     hubReady() {
@@ -607,7 +613,7 @@ const flow = {
     },
     tick() {
         const d = W.document;
-        if (!d || !d.body) return;
+        if (!d || !d.body || this.paused) return;
         try {
             const hh = input.el('happyHour');
             switch (this.state) {
@@ -690,7 +696,7 @@ const flow = {
     },
     frame(f) {
         const g = this.game;
-        if (!g || this.state !== 'game') return;
+        if (!g || this.state !== 'game' || this.paused) return;
         g.frames++; g.ctx.frames++;
         if (!g.ctx.t0) g.ctx.t0 = f.t;
         this.lastFrameAt = now();
@@ -1605,7 +1611,7 @@ const panel = {
         d.body.appendChild(el);
         this.el = el;
         const tg = el.querySelector('#pmToggle');
-        tg.onclick = () => { if (flow.timer) { flow.stop(); } else { flow.start(); } this.render(); };
+        tg.onclick = () => { if (!flow.timer) flow.start(); else if (flow.paused) flow.resume(); else flow.pause(); this.render(); };
         this.toggle = tg;
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
@@ -1620,9 +1626,9 @@ const panel = {
     },
     render() {
         if (!this.el || this.el.querySelector('#pmBody').hidden) return;
-        if (this.toggle) this.toggle.textContent = flow.timer ? 'pause' : 'resume';
+        if (this.toggle) this.toggle.textContent = (flow.timer && !flow.paused) ? 'pause' : 'resume';
         const g = flow.game;
-        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (flow.timer ? flow.state : 'PAUSED') + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
+        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (!flow.timer ? 'STOPPED' : flow.paused ? 'PAUSED' : flow.state) + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
         if (last) lines.push('last: ' + last.name + ' → ' + last.txt + (last.best ? ' ★' : ''));
         for (const n of config.games) {
@@ -1643,6 +1649,8 @@ const api = {
     config, learn, board, flow, drivers, hooks, input,
     start() { flow.start(); return 'started'; },
     stop() { flow.stop(); return 'stopped'; },
+    pause() { flow.pause(); return flow.paused ? 'paused' : 'not running'; },
+    resume() { flow.resume(); return 'resumed'; },
     skip() { if (flow.game) { log('skipping', flow.game.name); flow.endGame(); } const ok = input.el('hh_rrDone'); const bb = input.el('hh_backBtn'); if (ok && input.visible(input.el('hh_roundResult'))) input.click(ok); else if (bb && !bb.classList.contains('hidden')) input.click(bb); flow.set('hub'); return 'skipped'; },
     play(name) { name = String(name || '').toUpperCase(); if (!drivers[name]) return 'unknown game: ' + name; flow.queue.unshift(name); if (!flow.timer) flow.start(); return 'queued ' + name; },
     set(k, v) { config[k] = v; store.set('config', Object.assign(store.get('config', {}), { [k]: v })); return config; },

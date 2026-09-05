@@ -53,7 +53,7 @@ function makeEnv(config) {
         performance: { now: () => Date.now() },
         requestAnimationFrame: cb => { rafQ.push(cb); return rafQ.length; },
         cancelAnimationFrame: () => { },
-        setInterval: () => 0, clearInterval: () => { }, setTimeout, clearTimeout,
+        setInterval: () => 1, clearInterval: () => { }, setTimeout, clearTimeout,
         CanvasRenderingContext2D: Ctx,
         EventTarget: { prototype: Node.prototype },
         PointerEvent: Evt, MouseEvent: Evt, KeyboardEvent: Evt,

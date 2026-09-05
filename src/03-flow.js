@@ -214,6 +214,8 @@ function wantsPlay(name) {
 // ---------------------------------------------------------------- flow
 const flow = {
     state: 'idle',       // idle | title | hub | howto | game | result | stopped
+    paused: false,       // frozen in place: no ticking, no input, but the round is kept
+    pausedAt: 0,
     since: 0,
     game: null,          // {name, driver, t0, params, frames}
     queue: [],
@@ -239,6 +241,10 @@ const flow = {
         this.state = 'stopped';
         log('stopped');
     },
+    // freeze without abandoning the round; timers are shifted on resume so a paused
+    // stretch does not count against how-to / result waits
+    pause() { if (!this.timer || this.paused) return; this.paused = true; this.pausedAt = now(); log('paused'); },
+    resume() { if (!this.paused) { if (!this.timer) this.start(); return; } const d = now() - this.pausedAt; this.since += d; if (this.game) this.game.t0 += d; this.paused = false; log('resumed'); },
     set(state) { if (state !== this.state) { this.state = state; this.since = now(); if (config.verbose) log('→', state); } },
     age() { return now() - this.since; },
     hubReady() {
@@ -258,7 +264,7 @@ const flow = {
     },
     tick() {
         const d = W.document;
-        if (!d || !d.body) return;
+        if (!d || !d.body || this.paused) return;
         try {
             const hh = input.el('happyHour');
             switch (this.state) {
@@ -341,7 +347,7 @@ const flow = {
     },
     frame(f) {
         const g = this.game;
-        if (!g || this.state !== 'game') return;
+        if (!g || this.state !== 'game' || this.paused) return;
         g.frames++; g.ctx.frames++;
         if (!g.ctx.t0) g.ctx.t0 = f.t;
         this.lastFrameAt = now();

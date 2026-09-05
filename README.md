@@ -76,7 +76,8 @@ Console API — `pineMini.*`:
 
 | call | does |
 | --- | --- |
-| `start()` / `stop()` / `skip()` | control the loop |
+| `pause()` / `resume()` | freeze the bot in place and continue (keeps the round) |
+| `start()` / `stop()` / `skip()` | begin / tear down / abandon this round |
 | `play('GLASS STACK')` | queue one game next |
 | `best()` | every game: best, plays, board #1, target, beaten |
 | `results()` | the play log |

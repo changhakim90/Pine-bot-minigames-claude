@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 — pause actually pauses (2026-09-05)
+
+The panel button and `pineMini.pause()` / `resume()` now freeze the bot in
+place — the current round is kept, not abandoned, and how-to / result timers
+are shifted so the paused stretch does not count against them. `resume`
+continues exactly where it stopped. (`stop()` still tears down fully.)
+
 ## 0.4.1 — Stir Stop diagnostics and tolerance (2026-09-05)
 
 - Stir Stop finds its colour chips by size and row (a pixel of drift cannot

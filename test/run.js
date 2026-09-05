@@ -170,6 +170,21 @@ test('scheduler: targets, beaten, wantsPlay and the tuner stay inside their rang
     assert.ok(Object.keys(st).length >= 2, 'explored more than one value');
 });
 
+test('pause freezes the loop and keeps the round; resume continues it', () => {
+    const pm = makeEnv({ auto: false }).window.pineMini;
+    pm.flow.start();
+    pm.flow.game = { name: 'X', frames: 3, t0: 1000, ctx: {}, driver: {} };
+    const t0 = pm.flow.game.t0, since = pm.flow.since;
+    pm.pause();
+    assert.strictEqual(pm.flow.paused, true);
+    assert.ok(pm.flow.game, 'round is kept, not abandoned');
+    pm.flow.tick();               // must be a no-op while paused
+    pm.resume();
+    assert.strictEqual(pm.flow.paused, false);
+    assert.ok(pm.flow.game.t0 >= t0 && pm.flow.since >= since, 'timers shifted forward, not reset');
+    pm.flow.stop();
+});
+
 test('result screen: OK only — never the name field or SUBMIT', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'dist', 'pine-mini.user.js'), 'utf8');
     assert.ok(!/hh_rrSubmit|hh_rrName/.test(src), 'no reference to the submit button or the name field');
