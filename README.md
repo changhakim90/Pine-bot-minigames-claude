@@ -76,7 +76,7 @@ Console API — `pineMini.*`:
 
 | call | does |
 | --- | --- |
-| `pause()` / `resume()` | freeze the bot in place and continue (keeps the round) |
+| `pause()` / `resume()` | freeze in place / continue (resume also starts it if stopped); the panel has a button for each |
 | `start()` / `stop()` / `skip()` | begin / tear down / abandon this round |
 | `play('GLASS STACK')` | queue one game next |
 | `best()` | every game: best, plays, board #1, target, beaten |

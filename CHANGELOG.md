@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 — separate Pause and Resume buttons (2026-09-05)
+
+The panel now has two explicit buttons instead of one toggle: **pause**
+always pauses the bot, **resume** always resumes it (and starts it if it was
+stopped). Each is idempotent — pressing resume again while running is
+harmless — and the one that would do nothing is greyed out. Same from the
+console: `pineMini.pause()` / `pineMini.resume()`.
+
 ## 0.5.0 — fixes from live play: no more skipping, warm serves, or freezes (2026-09-05)
 
 Diagnosed from `pineMini.diag()` on the live site (a ~240 Hz display, which

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pine & Co Minigame Bot
 // @namespace    https://pineandco.online/
-// @version      0.5.0
+// @version      0.5.1
 // @description  Autonomous record-chasing player for the Pine & Co "Bartender's Happy Hour" mini games. Watches the game's own canvas draw calls, drives every game with frame-exact synthetic input, plays the whole set on its own, tunes itself from its results and never submits a name to the leaderboard.
 // @author       you
 // @match        https://pineandco.online/*
@@ -42,7 +42,7 @@
  * ===================================================================== */
 (function () {
 'use strict';
-const SCRIPT_VERSION = '0.5.0';
+const SCRIPT_VERSION = '0.5.1';
 const TAG = '[PineMini]';
 const NS = 'pineMini_';
 const W = (typeof window !== 'undefined') ? window : globalThis;
@@ -1596,13 +1596,16 @@ const panel = {
         el.id = 'pineMiniPanel';
         el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;background:rgba(10,12,10,.88);color:#e8e6dd;font:11px/1.5 monospace;padding:8px 10px;border:1px solid #3a7d4f;border-radius:6px;max-width:330px;pointer-events:auto;white-space:pre-wrap';
         el.addEventListener('pointerdown', e => e.stopPropagation());
-        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div><div style="margin-top:6px"><button id="pmToggle">pause</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div></div>'
+        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div><div style="margin-top:6px"><button id="pmPause">pause</button> <button id="pmResume">resume</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div></div>'
             + '<button id="pmShow" hidden style="all:unset;cursor:pointer;padding:2px 6px;color:#e6b450;font:11px monospace">▸ PineMini</button>';
         d.body.appendChild(el);
         this.el = el;
-        const tg = el.querySelector('#pmToggle');
-        tg.onclick = () => { if (!flow.timer) flow.start(); else if (flow.paused) flow.resume(); else flow.pause(); this.render(); };
-        this.toggle = tg;
+        // two explicit, idempotent buttons: pause always pauses, resume always resumes
+        // (and starts the bot if it was stopped). pressing either again is harmless.
+        this.pauseBtn = el.querySelector('#pmPause');
+        this.resumeBtn = el.querySelector('#pmResume');
+        this.pauseBtn.onclick = () => { api.pause(); this.render(); };
+        this.resumeBtn.onclick = () => { api.resume(); this.render(); };
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
         // hide collapses to a chip that brings it back — never to nothing
@@ -1616,7 +1619,9 @@ const panel = {
     },
     render() {
         if (!this.el || this.el.querySelector('#pmBody').hidden) return;
-        if (this.toggle) this.toggle.textContent = (flow.timer && !flow.paused) ? 'pause' : 'resume';
+        const running = flow.timer && !flow.paused;
+        if (this.pauseBtn) { this.pauseBtn.disabled = !running; this.pauseBtn.textContent = flow.paused ? 'paused' : 'pause'; }
+        if (this.resumeBtn) this.resumeBtn.disabled = running;
         const g = flow.game;
         const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (!flow.timer ? 'STOPPED' : flow.paused ? 'PAUSED' : flow.state) + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
@@ -1639,8 +1644,8 @@ const api = {
     config, learn, board, flow, drivers, hooks, input,
     start() { flow.start(); return 'started'; },
     stop() { flow.stop(); return 'stopped'; },
-    pause() { flow.pause(); return flow.paused ? 'paused' : 'not running'; },
-    resume() { flow.resume(); return 'resumed'; },
+    pause() { flow.pause(); return flow.paused ? 'paused' : (flow.timer ? 'running' : 'stopped'); },
+    resume() { if (!flow.timer) { flow.start(); return 'started'; } flow.resume(); return flow.paused ? 'paused' : 'running'; },
     skip() { if (flow.game) { log('skipping', flow.game.name); flow.endGame(); } const ok = input.el('hh_rrDone'); const bb = input.el('hh_backBtn'); if (ok && input.visible(input.el('hh_roundResult'))) input.click(ok); else if (bb && !bb.classList.contains('hidden')) input.click(bb); flow.set('hub'); return 'skipped'; },
     play(name) { name = String(name || '').toUpperCase(); if (!drivers[name]) return 'unknown game: ' + name; flow.queue.unshift(name); if (!flow.timer) flow.start(); return 'queued ' + name; },
     set(k, v) { config[k] = v; store.set('config', Object.assign(store.get('config', {}), { [k]: v })); return config; },

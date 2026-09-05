@@ -182,6 +182,12 @@ test('pause freezes the loop and keeps the round; resume continues it', () => {
     pm.resume();
     assert.strictEqual(pm.flow.paused, false);
     assert.ok(pm.flow.game.t0 >= t0 && pm.flow.since >= since, 'timers shifted forward, not reset');
+    pm.resume();                                     // resume again while running: harmless
+    assert.strictEqual(pm.flow.paused, false);
+    assert.ok(pm.flow.timer, 'still running after a second resume');
+    pm.flow.stop();
+    assert.strictEqual(pm.resume(), 'started');      // resume from stopped starts the bot
+    assert.ok(pm.flow.timer, 'resume started the bot');
     pm.flow.stop();
 });
 
