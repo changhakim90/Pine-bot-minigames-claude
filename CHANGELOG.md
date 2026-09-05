@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.1 — Table Rush spends hits as passage (2026-09-05)
+
+- Table Rush: the planner now searches three-segment key plans (9³ actions,
+  21 frames) and treats a collision as what it is in this game — one glass
+  for 1.5 s of invulnerability, with a glass back per cleared stage. It
+  spends one hit per stage when that is faster than waiting for a gap, and
+  keeps two glasses in reserve. Stage 15 in 80 s on the reference page
+  (0.2.0 stalled around stage 8 waiting for gaps).
+- Verified at the default targets: Order Up! ROUND 25 KO (5.3 min), Where Is
+  My Shot? ROUND 25 KO (3.7 min), Glass Stack 40 STACKED (27 s), Table Rush
+  STAGE 15 (81 s). Blind Pour over six plays: ±0.5 ±0.5 ±0.5 ±0.6 ±0.3 ±0.4.
+  Tip Catch over four: 80 / 72 / 78 / 94.
+- `test/e2e.js`: `--plays N` (play each game N times, learning check) and
+  `--targets '{"TABLE RUSH":15}'`.
+
 ## 0.2.0 — plays every game by itself, from the canvas (2026-09-05)
 
 Rewrite on the real architecture. The mini games keep their state inside a

@@ -226,16 +226,17 @@ defineDriver('GLASS STACK', {
 
 // ---------------------------------------------------------------- TABLE RUSH
 // Waiter 118 px/s per axis (diagonals are faster), mobs of radius 10–12.6
-// wander or stand. Every frame a receding-horizon search over two-step key
-// plans (9×9 actions) picks the move that reaches the table soonest without
-// touching anyone — except while invulnerable, when walking through is free.
-// One glass comes back per stage, so a single hit per stage is sustainable.
+// wander or stand. Every frame a receding-horizon search over three-segment
+// key plans (9³ actions, 21 frames) picks the move that reaches the table
+// soonest. Touching a guest costs a glass but grants 1.5 s of invulnerability,
+// and every cleared stage gives a glass back — so the planner spends one hit
+// per stage (keeping two glasses in reserve) as free passage through the crowd.
 const TR_ACTS = []; for (let iy = -1; iy <= 1; iy++) for (let ix = -1; ix <= 1; ix++) TR_ACTS.push([ix, iy]);
 defineDriver('TABLE RUSH', {
     kind: 'unbounded', defaultTarget: 15,
     tunables: { safety: { min: 1, max: 9, step: 2, init: 5, explore: 0.2 } },
     make(ctx) {
-        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], lastAct = null, lastMe = null, dying = false;
+        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], lastAct = null, lastMe = null, dying = false, hitsThisStage = 0;
         const setKeys = a => {
             const want = { d: a[0] > 0, a: a[0] < 0, s: a[1] > 0, w: a[1] < 0 };
             for (const k in want) { if (!!keysDown[k] !== want[k]) { input.key(k, want[k]); keysDown[k] = want[k]; } }
@@ -249,12 +250,12 @@ defineDriver('TABLE RUSH', {
                 if (!st) { if (F.has('TRAY DOWN') || F.has('STAGE')) setKeys([0, 0]); return; }
                 const lv = +st.m[1];
                 const t = F.t, dt = F.dt;
-                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; }
+                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; hitsThisStage = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - ctx.t0) / 1000).toFixed(1) + 's'); }
                 // glasses HUD: arcs at y=25, gold = alive
                 const arcs = F.arcs.filter(o => Math.abs(o.y - 25) < 0.6 && Math.abs(o.r - 7) < 0.6);
                 if (arcs.length === 3) {
                     const alive = arcs.filter(o => /e6b450/i.test(o.fs)).length;
-                    if (alive < glasses) invUntil = Math.max(invUntil, t + 1500 - dt * 1000);
+                    if (alive < glasses) { invUntil = Math.max(invUntil, t + 1500 - dt * 1000); hitsThisStage++; if (config.verbose) ctx.log('hit at stage', lv, 'glasses', alive, 'me', me.x.toFixed(0), me.y.toFixed(0)); }
                     glasses = alive;
                 }
                 // waiter position (hidden on blink frames while invulnerable → integrate our own input)
@@ -275,30 +276,45 @@ defineDriver('TABLE RUSH', {
                 const target = ctx.target.v;
                 dying = lv > target;
                 const R = 12.6 + 12 + ctx.params.safety;
-                const invLeft = (invUntil - t) / 1000;
-                // two-step plans: action a for h1 frames, then b for the rest of the horizon
-                const H = 20, h1 = 8;
+                const invLeft0 = Math.max(0, (invUntil - t) / 1000);
+                // a hit costs one glass but buys 1.5 s of walking through the crowd; every
+                // cleared stage gives one glass back, so glasses-1 hits per stage are free
+                const budget0 = dying ? 0 : Math.max(0, glasses - 2 - hitsThisStage);   // never spend the last-but-one glass
+                // three segments of 7 frames over the 9 actions; mob positions precomputed per step
+                const SEG = 7, NSEG = 3, H = SEG * NSEG, spd = 118 * dt;
+                const mx = [], my = [];
+                for (let k = 1; k <= H; k++) { const ax = [], ay = []; for (const m of mobs) { ax.push(m.x + m.vx * dt * k); ay.push(m.y + m.vy * dt * k); } mx.push(ax); my.push(ay); }
                 let best = null;
-                const sim = (a, b) => {
-                    let x = me.x, y = me.y, cost = 0, hit = -1;
+                const sim = (acts) => {
+                    let x = me.x, y = me.y, cost = 0, inv = invLeft0, budget = budget0, hits = 0;
                     for (let k = 1; k <= H; k++) {
-                        const ac = k <= h1 ? a : b;
-                        const spd = 118 * dt;
+                        const ac = acts[Math.floor((k - 1) / SEG)];
                         x = clamp(x + ac[0] * spd, 20, 380); y = clamp(y + ac[1] * spd, 78, 434);
-                        if (k * dt > invLeft) {
-                            for (const m of mobs) { const mx = m.x + m.vx * dt * k, my = m.y + m.vy * dt * k; if (hypot(mx - x, my - y) < R) { hit = k; break; } }
+                        if (inv > 0) inv -= dt;
+                        else {
+                            const px = mx[k - 1], py = my[k - 1];
+                            for (let i = 0; i < px.length; i++) {
+                                const ddx = px[i] - x, ddy = py[i] - y;
+                                if (ddx * ddx + ddy * ddy < R * R) {
+                                    hits++;
+                                    if (dying) return -1000 + k;
+                                    if (budget > 0) {
+                                        budget--; inv = 1.5; cost += 70;
+                                        const a = Math.atan2(y - py[i], x - px[i]); x = clamp(x + Math.cos(a) * 26, 20, 380); y = clamp(y + Math.sin(a) * 26, 78, 434);
+                                    } else { return goalDist(x, y) + 600 + (H - k) * 10 + cost; }
+                                    break;
+                                }
+                            }
                         }
-                        if (hit > 0) break;
-                        if (y < 92 && Math.abs(x - 200) < 44) { cost -= (H - k) * 6; break; }
+                        if (y < 92 && Math.abs(x - 200) < 44) return cost - (H - k) * 6;
                     }
-                    const gd = goalDist(x, y);
-                    if (dying) return hit > 0 ? -1000 + hit : gd;          // seek the nearest collision
-                    return gd + (hit > 0 ? 600 + (H - hit) * 10 : 0) + cost;
+                    return goalDist(x, y) + cost;
                 };
-                for (const a of TR_ACTS) for (const b of TR_ACTS) {
-                    const v = sim(a, b) + (a[0] === 0 && a[1] === 0 ? 0.5 : 0);
+                const acts = [null, null, null];
+                for (const a of TR_ACTS) { acts[0] = a; for (const b of TR_ACTS) { acts[1] = b; for (const c of TR_ACTS) { acts[2] = c;
+                    const v = sim(acts) + (a[0] === 0 && a[1] === 0 ? 0.5 : 0);
                     if (!best || v < best.v) best = { v, a };
-                }
+                } } }
                 act = best ? best.a : [0, 0];
                 if (dying && best && best.v > -500) {
                     // no mob reachable in the horizon: walk toward the closest one

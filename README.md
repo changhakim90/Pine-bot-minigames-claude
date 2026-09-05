@@ -32,7 +32,7 @@ survivor-mode bot); same layout and release loop, separate script.
 | Tip Catch | 75 | tracks every item's speed, catches the earliest reachable good one |
 | Fly Swat | 187 | one shot per fly per frame |
 | Glass Stack | n STACKED (target) | predicts the swing, taps at the crossing that cancels the lean |
-| Table Rush | STAGE n (target) | receding-horizon search over key plans, walks through mobs while invulnerable |
+| Table Rush | STAGE n (target) | receding-horizon search over key plans; spends one hit per stage as 1.5 s of free passage (a glass comes back per stage) |
 
 ## Layout
 

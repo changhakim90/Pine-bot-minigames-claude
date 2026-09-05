@@ -11,6 +11,7 @@ const games = String(flag('--games', ALL.join(','))).split(',').map(s => s.trim(
 const verbose = !!flag('--verbose', false);
 const timeoutS = +flag('--timeout', 300);
 const nPages = Math.max(1, +flag('--pages', 3));
+const plays = Math.max(1, +flag('--plays', 1));      // play each game this many times (learning check)
 const port = 8123 + Math.floor(Math.random() * 500);
 
 // what "good" means per game on the reference page (placeholder art, no board)
@@ -30,7 +31,7 @@ const EXPECT = {
     'TABLE RUSH': m => m.v >= 6
 };
 // e2e targets are lower than the defaults so the run stays short
-const E2E_TARGET = { 'ICE CARVING': 60, 'CHAMPAGNE LAUNCH': 300, 'ORDER UP!': 8, 'WHERE IS MY SHOT?': 8, 'GLASS STACK': 20, 'TABLE RUSH': 6 };
+const E2E_TARGET = Object.assign({ 'ICE CARVING': 60, 'CHAMPAGNE LAUNCH': 300, 'ORDER UP!': 8, 'WHERE IS MY SHOT?': 8, 'GLASS STACK': 20, 'TABLE RUSH': 6 }, flag('--targets', null) ? JSON.parse(flag('--targets')) : {});   // --targets '{"TABLE RUSH":15}'
 
 function chromePath() {
     if (process.env.PINE_CHROME) return process.env.PINE_CHROME;
@@ -56,15 +57,16 @@ function chromePath() {
         const page = await browser.newPage({ viewport: { width: 520, height: 900 } });
         page.on('console', m => { const t = m.text(); if (/\[PineMini\]/.test(t) && (verbose || /result|playing|target|fired|served|KO|plan|distance|pours/.test(t))) console.log('[p' + pi + ']', t.slice(0, 220)); });
         page.on('pageerror', e => console.log('[p' + pi + ' pageerror]', e.message));
-        const cfg = { games: list, loop: false, once: true, board: false, panel: false, howtoWaitMs: 500, resultWaitMs: 300, verbose, e2eTargets: E2E_TARGET };
+        const cfg = { games: plays > 1 ? [].concat(...Array.from({ length: plays }, () => list)) : list, loop: false, once: true, board: false, panel: false, howtoWaitMs: 500, resultWaitMs: 300, verbose, e2eTargets: E2E_TARGET };
         await page.addInitScript('window.__pineMiniConfig = ' + JSON.stringify(cfg) + ';\n' + script);
         await page.goto('http://127.0.0.1:' + port + '/', { waitUntil: 'domcontentloaded' });
         const deadline = Date.now() + timeoutS * 1000;
         while (Date.now() < deadline) {
             await page.waitForTimeout(1000);
             const r = await page.evaluate(() => window.pineMini ? window.pineMini.results() : []).catch(() => []);
-            for (const x of r) results[x.name] = x;
-            if (list.every(g => results[g])) break;
+            const count = {};
+            for (const x of r) { results[x.name] = x; count[x.name] = (count[x.name] || 0) + 1; }
+            if (list.every(g => (count[g] || 0) >= plays)) break;
         }
         await page.close();
     }));
