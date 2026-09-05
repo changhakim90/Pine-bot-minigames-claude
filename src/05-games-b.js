@@ -246,31 +246,19 @@ defineDriver('GLASS STACK', {
                 }
                 if (prevX == null) { prevX = x; return; }
                 waited++;
-                // phase from x, branch from the direction of motion
-                const s = clamp((x - cx0) / amp, -1, 1);
-                let ph = Math.asin(s);
-                if (x < prevX) ph = Math.PI - ph;
                 const want = topX + clamp(-lean / 0.78, -6, 6);
-                const dNow = Math.abs(x - want);
-                // scan up to three swings ahead for the frame that samples nearest `want`;
-                // tap now only if this frame is that one (re-planned every frame, so timing
-                // jitter over the wait never matters — the tap always uses the real x)
-                const dt = F.dt, period = 2 * Math.PI / sp, K = Math.min(720, Math.ceil(3 * period / dt));
-                let bestK = 0, bestD = dNow;
-                for (let k = 1; k <= K; k++) {
-                    const d = Math.abs(cx0 + Math.sin(ph + k * dt * sp) * amp - want) + k * 0.0015;
-                    if (d < bestD) { bestD = d; bestK = k; }
-                }
-                // the longer we have waited, the more we accept (never more than half a frame-step)
-                const step = amp * sp * dt;
-                const tol = Math.min(step * 0.51 + 0.35, 1.0 + (waited / K) * step);
-                if (bestK === 0 && dNow <= tol) {
+                // Tap the frame the swing crosses `want` — the piece is momentarily at the
+                // lean-cancelling spot. Precision equals one frame-step (~0.4 px at 240 Hz) and
+                // it fires every swing at any refresh. (The old nearest-sample scan almost never
+                // picked the current frame at high refresh, so the driver never tapped at all.)
+                if ((x - want) * (prevX - want) <= 0 && x !== prevX) {
                     input.down(c, 200, 240, c); ctx.acted(); tapped++; tapLevel = level;
                     if (config.verbose) ctx.log('placed level', level, 'dx', (x - topX).toFixed(2), 'lean', lean.toFixed(1), 'after', waited, 'frames');
                 }
                 prevX = x;
             },
-            result(m) { ctx.log('stacked', m && m.v, 'taps', tapped, 'target', ctx.target.v); }
+            result(m) { ctx.log('stacked', m && m.v, 'taps', tapped, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max'); },
+            state() { return { level: prevLevel, tapped, tapLevel, waited }; }
         };
     }
 });
@@ -288,7 +276,7 @@ defineDriver('TABLE RUSH', {
     kind: 'unbounded', defaultTarget: 15,
     tunables: { safety: { min: 1, max: 9, step: 2, init: 5, explore: 0.2 } },
     make(ctx) {
-        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], lastAct = null, lastMe = null, dying = false, hitsThisStage = 0, bestY = 1e9, stuckFrames = 0;
+        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], dying = false, lastPlanT = 0, bestY = 1e9, stuckFrames = 0;
         const setKeys = a => {
             const want = { d: a[0] > 0, a: a[0] < 0, s: a[1] > 0, w: a[1] < 0 };
             for (const k in want) { if (!!keysDown[k] !== want[k]) { input.key(k, want[k]); keysDown[k] = want[k]; } }
@@ -303,12 +291,12 @@ defineDriver('TABLE RUSH', {
                 ctx.alive();
                 const lv = +st.m[1];
                 const t = F.t, dt = F.dt;
-                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastMe = null; hitsThisStage = 0; bestY = 1e9; stuckFrames = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - ctx.t0) / 1000).toFixed(1) + 's'); }
+                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastPlanT = 0; bestY = 1e9; stuckFrames = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - (ctx.t0 || 0)) / 1000).toFixed(1) + 's'); }
                 // glasses HUD: arcs at y=25, gold = alive
                 const arcs = F.arcs.filter(o => Math.abs(o.y - 25) < 0.6 && Math.abs(o.r - 7) < 0.6);
                 if (arcs.length === 3) {
                     const alive = arcs.filter(o => /e6b450/i.test(o.fs)).length;
-                    if (alive < glasses) { invUntil = Math.max(invUntil, t + 1500 - dt * 1000); hitsThisStage++; if (config.verbose) ctx.log('hit at stage', lv, 'glasses', alive, 'me', me.x.toFixed(0), me.y.toFixed(0)); }
+                    if (alive < glasses) { invUntil = Math.max(invUntil, t + 1500 - dt * 1000); if (config.verbose) ctx.log('hit at stage', lv, 'glasses', alive, 'me', me.x.toFixed(0), me.y.toFixed(0)); }
                     glasses = alive;
                 }
                 // waiter position (hidden on blink frames while invulnerable → integrate our own input)
@@ -330,60 +318,52 @@ defineDriver('TABLE RUSH', {
                 }
                 prevMobs = mobs;
                 const target = ctx.target.v;
-                dying = lv > target;
-                // the game collides at m.r (10–12.6) + me.r (12); `safety` is our margin on top
+                dying = isFinite(target) && lv > target;
+                // the game collides at m.r (10–12.6) + me.r (12); `safety` is our margin
                 const R = 12.6 + 12 + ctx.params.safety;
-                const invLeft0 = Math.max(0, (invUntil - t) / 1000);
-                // a hit is worth a glass once the hall is crowded (stage 4+) or the crowd has held
-                // us for most of a second — early stages are crossed clean
-                if (me.y < bestY - 2) { bestY = me.y; stuckFrames = 0; } else stuckFrames++;
-                const stuck = stuckFrames > 0.8 / dt;
-                const budget0 = dying || !(stuck || mobs.length >= 24) ? 0 : Math.max(0, glasses - 2 - hitsThisStage);   // never spend the last-but-one glass
-                // 0.4 s horizon in three segments at a FIXED 33 ms step — independent of the
-                // display's refresh, so the search cost cannot explode on a 240 Hz screen (it did,
-                // freezing the tab). Only the nearest guests take part; the rest cannot be reached.
-                const step = 1 / 30, H = 12, SEG = 4, spd = 118 * step;
-                const reach = 118 * 1.45 * 0.4 + 160;
-                const near = mobs.filter(m => hypot(m.x - me.x, m.y - me.y) < reach)
-                    .sort((a, b) => hypot(a.x - me.x, a.y - me.y) - hypot(b.x - me.x, b.y - me.y)).slice(0, 14);
-                const mx = [], my = [];
-                for (let k = 1; k <= H; k++) { const ax = [], ay = []; for (const m of near) { ax.push(m.x + m.vx * step * k); ay.push(m.y + m.vy * step * k); } mx.push(ax); my.push(ay); }
-                let best = null;
-                const sim = (acts) => {
-                    let x = me.x, y = me.y, cost = 0, inv = invLeft0, budget = budget0;
-                    for (let k = 1; k <= H; k++) {
-                        const ac = acts[Math.floor((k - 1) / SEG)];
-                        x = clamp(x + ac[0] * spd, 20, 380); y = clamp(y + ac[1] * spd, 78, 434);
-                        if (inv > 0) inv -= step;
-                        else {
-                            const px = mx[k - 1], py = my[k - 1];
-                            for (let i = 0; i < px.length; i++) {
-                                const ddx = px[i] - x, ddy = py[i] - y;
-                                if (ddx * ddx + ddy * ddy < R * R) {
-                                    if (dying) return -1000 + k;
-                                    if (budget > 0) {
-                                        budget--; inv = 1.5; cost += 70;
-                                        const a = Math.atan2(y - py[i], x - px[i]); x = clamp(x + Math.cos(a) * 26, 20, 380); y = clamp(y + Math.sin(a) * 26, 78, 434);
-                                    } else { return goalDist(x, y) + 600 + (H - k) * 10 + cost; }
-                                    break;
-                                }
-                            }
+                const invLeft = (invUntil - t) / 1000;
+
+                // upward progress bookkeeping (a hit knocks us back, so "no new best y" = walled)
+                if (me.y < bestY - 2) { bestY = me.y; stuckFrames = 0; } else stuckFrames += 1;
+                const stuck = stuckFrames * dt > 0.7;
+
+                // Re-plan on a throttled clock (~45 ms), not every rendered frame. Deciding
+                // 240×/s made the choice flip frame to frame, so the waiter jittered in place.
+                // Between plans the keys are simply held, so it commits and crosses the floor.
+                if (t - lastPlanT >= 45) {
+                    lastPlanT = t;
+                    const preds = [0.12, 0.28].map(La => mobs.map(m => ({ x: m.x + m.vx * La, y: m.y + m.vy * La })));
+                    // climb to the table (y↓), then centre on x=200
+                    const goalPot = (x, y) => 1.5 * Math.max(0, y - 80) + Math.max(0, Math.abs(x - 200) - 30) * (y < 140 ? 2.2 : 0.7);
+                    const RR = R + 14;
+                    const repel = (x, y) => { let r = 0; for (const pred of preds) for (const m of pred) { const d = hypot(m.x - x, m.y - y); if (d < RR) r += (RR - d) * 16; } return r; };
+                    const spd = 118 * 0.15;
+                    const pick = useRepel => {
+                        let best = null;
+                        for (const a of TR_ACTS) {
+                            const nx = clamp(me.x + a[0] * spd, 20, 380), ny = clamp(me.y + a[1] * spd, 78, 430);
+                            const keep = (a[0] === act[0] && a[1] === act[1]) ? -8 : 0;
+                            const idle = (a[0] === 0 && a[1] === 0) ? 6 : 0;
+                            const v = goalPot(nx, ny) + (useRepel ? repel(nx, ny) : 0) + keep + idle;
+                            if (!best || v < best.v) best = { v, a };
                         }
-                        if (y < 92 && Math.abs(x - 200) < 44) return cost - (H - k) * 6;
+                        return best.a;
+                    };
+                    if (dying) {
+                        // deliberate loss (a pinned target): walk into the nearest guest
+                        let n = null, nd = 1e9;
+                        for (const m of mobs) { const d = hypot(m.x - me.x, m.y - me.y); if (d < nd) { nd = d; n = m; } }
+                        act = n ? [Math.sign(n.x - me.x), Math.sign(n.y - me.y)] : [0, 1];
+                    } else if (invLeft > 0.15) {
+                        // invulnerable: ignore the crowd and sprint for the table
+                        act = pick(false);
+                    } else if (stuck && glasses > 1) {
+                        // walled by the crowd with a glass to spare: punch straight toward the goal,
+                        // take the hit, and the 1.5 s shield that follows carries us through
+                        act = pick(false);
+                    } else {
+                        act = pick(true);
                     }
-                    return goalDist(x, y) + cost;
-                };
-                const acts = [null, null, null];
-                for (const a of TR_ACTS) { acts[0] = a; for (const b of TR_ACTS) { acts[1] = b; for (const c of TR_ACTS) { acts[2] = c;
-                    const v = sim(acts) + (a[0] === 0 && a[1] === 0 ? 0.5 : 0);
-                    if (!best || v < best.v) best = { v, a };
-                } } }
-                act = best ? best.a : [0, 0];
-                if (dying && best && best.v > -500) {
-                    // no mob reachable in the horizon: walk toward the closest one
-                    let near = null, nd = 1e9;
-                    for (const m of mobs) { const d = hypot(m.x - me.x, m.y - me.y); if (d < nd) { nd = d; near = m; } }
-                    if (near) act = [Math.sign(near.x - me.x), Math.sign(near.y - me.y)];
                 }
                 setKeys(act);
                 if (act[0] || act[1]) ctx.acted();
@@ -391,7 +371,7 @@ defineDriver('TABLE RUSH', {
             },
             stop() { setKeys([0, 0]); },
             result(m) { setKeys([0, 0]); ctx.log('stage', m && m.v, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max'); },
-            state() { return { stage, glasses, me: { x: Math.round(me.x), y: Math.round(me.y) }, mobs: prevMobs.length, act, invMs: Math.max(0, Math.round(invUntil - (api.frame ? api.frame.t : 0))) }; }
+            state() { return { stage, glasses, dying, me: { x: Math.round(me.x), y: Math.round(me.y) }, mobs: prevMobs.length, act, invMs: Math.max(0, Math.round(invUntil - (api.frame ? api.frame.t : 0))) }; }
         };
     }
 });

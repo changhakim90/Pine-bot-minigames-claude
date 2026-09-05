@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.2 — Glass Stack taps again; Table Rush climbs again (2026-09-05)
+
+Both from live diag on a 240 Hz display.
+
+- **Glass Stack never tapped** (`actedAt: 0`). The placement test looked for the
+  frame that samples nearest the target spot, which at 240 fps is almost never
+  the current frame, so it dropped nothing. It now taps the frame the swing
+  crosses the lean-cancelling point — precise to one frame-step at any refresh,
+  and it fires every swing. 40 stacked with per-piece error ≈ 0–9 px, lean held near zero.
+- **Table Rush** was a two-part fix: it froze the tab (planner cost scaled with
+  refresh) and then, once throttled, either jittered in place or — as a pure
+  avoider — refused to approach the crowd and got ground down at the start line.
+  It now runs a throttled potential field (climb + centre, guests repelled),
+  sprints for the table while invulnerable, and — when walled with a glass to
+  spare — punches through to spend a hit for the 1.5 s shield the game grants,
+  which a cleared stage pays back. Reaches stage 11–15 on the reference page.
+- diag() carries Glass Stack and Table Rush driver state.
+
 ## 0.5.1 — separate Pause and Resume buttons (2026-09-05)
 
 The panel now has two explicit buttons instead of one toggle: **pause**
