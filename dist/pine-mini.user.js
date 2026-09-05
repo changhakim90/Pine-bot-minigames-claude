@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pine & Co Minigame Bot
 // @namespace    https://pineandco.online/
-// @version      0.5.4
+// @version      0.6.0
 // @description  Autonomous record-chasing player for the Pine & Co "Bartender's Happy Hour" mini games. Watches the game's own canvas draw calls, drives every game with frame-exact synthetic input, plays the whole set on its own, tunes itself from its results and never submits a name to the leaderboard.
 // @author       you
 // @match        https://pineandco.online/*
@@ -42,7 +42,7 @@
  * ===================================================================== */
 (function () {
 'use strict';
-const SCRIPT_VERSION = '0.5.4';
+const SCRIPT_VERSION = '0.6.0';
 const TAG = '[PineMini]';
 const NS = 'pineMini_';
 const W = (typeof window !== 'undefined') ? window : globalThis;
@@ -73,6 +73,7 @@ const DEFAULT_CONFIG = {
     stallFrames: 3600,      // frames a driver may go without acting before the round is abandoned (~1 min)
     targets: {},            // per-game target override, e.g. {'ORDER UP!': 60}
     resultWaitMs: 900,      // read the result screen this long before pressing OK
+    pauseOnResult: false,   // hold on the scoreboard until the user resumes (then press OK)
     max: true,              // unbounded games play for the most the round allows (below); false = board #1 + margin
     roundBudgetMin: 12,     // max mode: minutes an endless round may run before the driver ends it on purpose
     margin: 0.10,           // (max: false) unbounded games aim this far above the board's #1 (fraction)
@@ -565,6 +566,8 @@ const flow = {
     state: 'idle',       // idle | title | hub | howto | game | result | stopped
     paused: false,       // frozen in place: no ticking, no input, but the round is kept
     pausedAt: 0,
+    heldResult: false,   // paused ON the scoreboard (OK not yet pressed)
+    resultRecorded: false,
     since: 0,
     game: null,          // {name, driver, t0, params, frames}
     queue: [],
@@ -593,7 +596,28 @@ const flow = {
     // freeze without abandoning the round; timers are shifted on resume so a paused
     // stretch does not count against how-to / result waits
     pause() { if (!this.timer || this.paused) return; this.paused = true; this.pausedAt = now(); log('paused'); },
-    resume() { if (!this.paused) { if (!this.timer) this.start(); return; } const d = now() - this.pausedAt; this.since += d; if (this.game) this.game.t0 += d; this.paused = false; log('resumed'); },
+    resume() {
+        if (this.heldResult) {                       // was holding on the scoreboard: press OK and go on
+            const ok = input.el('hh_rrDone'); if (ok) input.click(ok);
+            this.heldResult = false; this.resultRecorded = false; this.paused = false; this.set('hub');
+            log('resumed — advanced past the scoreboard'); return;
+        }
+        if (!this.paused) { if (!this.timer) this.start(); return; }
+        const d = now() - this.pausedAt; this.since += d; if (this.game) this.game.t0 += d; this.paused = false; log('resumed');
+    },
+    // play a specific game now (name), or 'ALL' for the whole set; (re)starts if needed
+    play(name) {
+        name = String(name == null ? 'ALL' : name).toUpperCase();
+        if (name === 'ALL' || name === '') config.games = GAME_NAMES.slice();
+        else { if (!drivers[name]) return 'unknown game: ' + name; config.games = [name]; }
+        store.set('config', Object.assign(store.get('config', {}), { games: config.games }));
+        this.heldResult = false; this.resultRecorded = false;
+        this.endGame();
+        this.queue = config.games.filter(n => drivers[n]);
+        if (!this.timer) this.start(); else { this.paused = false; this.set('hub'); }
+        return 'playing ' + config.games.join(', ');
+    },
+
     set(state) { if (state !== this.state) { this.state = state; this.since = now(); if (config.verbose) log('→', state); } },
     age() { return now() - this.since; },
     hubReady() {
@@ -655,7 +679,7 @@ const flow = {
                 }
                 case 'game': {
                     const rr = input.el('hh_roundResult');
-                    if (rr && !rr.classList.contains('hidden')) { this.set('result'); break; }
+                    if (rr && !rr.classList.contains('hidden')) { this.resultRecorded = false; this.set('result'); break; }
                     if (this.game && this.game.driver && this.game.driver.tick) this.game.driver.tick();
                     if (!input.visible(input.el('hh_game')) && this.age() > 3000) { warn('game screen gone'); this.endGame(); this.set('hub'); }
                     // Where Is My Shot, Glass Stack, Order Up and Table Rush have no clock: they
@@ -669,11 +693,14 @@ const flow = {
                 }
                 case 'result': {
                     if (this.age() < config.resultWaitMs) break;
-                    const txt = (input.el('hh_rrRate') || {}).textContent || '';
-                    this.finishGame(txt.trim());
+                    if (!this.resultRecorded) { const txt = (input.el('hh_rrRate') || {}).textContent || ''; this.finishGame(txt.trim()); this.resultRecorded = true; }
+                    // hold on the scoreboard until the user resumes, if asked
+                    if (config.pauseOnResult && !this.heldResult) { this.heldResult = true; this.pause(); break; }
+                    if (this.paused) break;
                     // never a name, never SUBMIT: only OK
                     const ok = input.el('hh_rrDone');
                     if (ok) input.click(ok);
+                    this.resultRecorded = false;
                     this.set('hub');
                     break;
                 }
@@ -1567,7 +1594,12 @@ const panel = {
         el.id = 'pineMiniPanel';
         el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;background:rgba(10,12,10,.88);color:#e8e6dd;font:11px/1.5 monospace;padding:8px 10px;border:1px solid #3a7d4f;border-radius:6px;max-width:330px;pointer-events:auto;white-space:pre-wrap';
         el.addEventListener('pointerdown', e => e.stopPropagation());
-        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div><div style="margin-top:6px"><button id="pmPause">pause</button> <button id="pmResume">resume</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div></div>'
+        const opts = ['<option value="">All games (loop)</option>'].concat(GAME_NAMES.map(n => '<option value="' + n + '">' + n + '</option>')).join('');
+        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div>'
+            + '<div style="margin-top:6px;display:flex;gap:4px"><select id="pmGame" style="flex:1;min-width:0;background:#14170f;color:#e8e6dd;border:1px solid #3a7d4f;font:11px monospace">' + opts + '</select> <button id="pmPlay">play</button></div>'
+            + '<div style="margin-top:6px"><button id="pmPause">pause</button> <button id="pmResume">resume</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div>'
+            + '<div style="margin-top:5px;font-size:10px;opacity:.85"><label><input type="checkbox" id="pmHold"> hold on scoreboard</label> &nbsp; <label><input type="checkbox" id="pmAuto"> auto-start</label></div>'
+            + '</div>'
             + '<button id="pmShow" hidden style="all:unset;cursor:pointer;padding:2px 6px;color:#e6b450;font:11px monospace">▸ PineMini</button>';
         d.body.appendChild(el);
         this.el = el;
@@ -1577,6 +1609,13 @@ const panel = {
         this.resumeBtn = el.querySelector('#pmResume');
         this.pauseBtn.onclick = () => { api.pause(); this.render(); };
         this.resumeBtn.onclick = () => { api.resume(); this.render(); };
+        const sel = el.querySelector('#pmGame');
+        sel.value = (config.games && config.games.length === 1) ? config.games[0] : '';
+        el.querySelector('#pmPlay').onclick = () => { flow.play(sel.value || 'ALL'); this.render(); };
+        const hold = el.querySelector('#pmHold'); hold.checked = !!config.pauseOnResult;
+        hold.onchange = () => api.set('pauseOnResult', hold.checked);
+        const auto = el.querySelector('#pmAuto'); auto.checked = !!config.auto;
+        auto.onchange = () => api.set('auto', auto.checked);
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
         // hide collapses to a chip that brings it back — never to nothing
@@ -1594,7 +1633,8 @@ const panel = {
         if (this.pauseBtn) { this.pauseBtn.disabled = !running; this.pauseBtn.textContent = flow.paused ? 'paused' : 'pause'; }
         if (this.resumeBtn) this.resumeBtn.disabled = running;
         const g = flow.game;
-        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (!flow.timer ? 'STOPPED' : flow.paused ? 'PAUSED' : flow.state) + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
+        const status = !flow.timer ? 'STOPPED' : flow.heldResult ? 'SCOREBOARD — press resume' : flow.paused ? 'PAUSED' : flow.state;
+        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + status + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
         if (last) lines.push('last: ' + last.name + ' → ' + last.txt + (last.best ? ' ★' : ''));
         for (const n of config.games) {
@@ -1618,7 +1658,8 @@ const api = {
     pause() { flow.pause(); return flow.paused ? 'paused' : (flow.timer ? 'running' : 'stopped'); },
     resume() { if (!flow.timer) { flow.start(); return 'started'; } flow.resume(); return flow.paused ? 'paused' : 'running'; },
     skip() { if (flow.game) { log('skipping', flow.game.name); flow.endGame(); } const ok = input.el('hh_rrDone'); const bb = input.el('hh_backBtn'); if (ok && input.visible(input.el('hh_roundResult'))) input.click(ok); else if (bb && !bb.classList.contains('hidden')) input.click(bb); flow.set('hub'); return 'skipped'; },
-    play(name) { name = String(name || '').toUpperCase(); if (!drivers[name]) return 'unknown game: ' + name; flow.queue.unshift(name); if (!flow.timer) flow.start(); return 'queued ' + name; },
+    play(name) { return flow.play(name); },
+    games(list) { if (list) { config.games = (Array.isArray(list) ? list : [list]).map(n => String(n).toUpperCase()).filter(n => drivers[n]); api.set('games', config.games); } return config.games; },
     set(k, v) { config[k] = v; store.set('config', Object.assign(store.get('config', {}), { [k]: v })); return config; },
     status() {
         const g = flow.game;

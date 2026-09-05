@@ -216,6 +216,8 @@ const flow = {
     state: 'idle',       // idle | title | hub | howto | game | result | stopped
     paused: false,       // frozen in place: no ticking, no input, but the round is kept
     pausedAt: 0,
+    heldResult: false,   // paused ON the scoreboard (OK not yet pressed)
+    resultRecorded: false,
     since: 0,
     game: null,          // {name, driver, t0, params, frames}
     queue: [],
@@ -244,7 +246,28 @@ const flow = {
     // freeze without abandoning the round; timers are shifted on resume so a paused
     // stretch does not count against how-to / result waits
     pause() { if (!this.timer || this.paused) return; this.paused = true; this.pausedAt = now(); log('paused'); },
-    resume() { if (!this.paused) { if (!this.timer) this.start(); return; } const d = now() - this.pausedAt; this.since += d; if (this.game) this.game.t0 += d; this.paused = false; log('resumed'); },
+    resume() {
+        if (this.heldResult) {                       // was holding on the scoreboard: press OK and go on
+            const ok = input.el('hh_rrDone'); if (ok) input.click(ok);
+            this.heldResult = false; this.resultRecorded = false; this.paused = false; this.set('hub');
+            log('resumed — advanced past the scoreboard'); return;
+        }
+        if (!this.paused) { if (!this.timer) this.start(); return; }
+        const d = now() - this.pausedAt; this.since += d; if (this.game) this.game.t0 += d; this.paused = false; log('resumed');
+    },
+    // play a specific game now (name), or 'ALL' for the whole set; (re)starts if needed
+    play(name) {
+        name = String(name == null ? 'ALL' : name).toUpperCase();
+        if (name === 'ALL' || name === '') config.games = GAME_NAMES.slice();
+        else { if (!drivers[name]) return 'unknown game: ' + name; config.games = [name]; }
+        store.set('config', Object.assign(store.get('config', {}), { games: config.games }));
+        this.heldResult = false; this.resultRecorded = false;
+        this.endGame();
+        this.queue = config.games.filter(n => drivers[n]);
+        if (!this.timer) this.start(); else { this.paused = false; this.set('hub'); }
+        return 'playing ' + config.games.join(', ');
+    },
+
     set(state) { if (state !== this.state) { this.state = state; this.since = now(); if (config.verbose) log('→', state); } },
     age() { return now() - this.since; },
     hubReady() {
@@ -306,7 +329,7 @@ const flow = {
                 }
                 case 'game': {
                     const rr = input.el('hh_roundResult');
-                    if (rr && !rr.classList.contains('hidden')) { this.set('result'); break; }
+                    if (rr && !rr.classList.contains('hidden')) { this.resultRecorded = false; this.set('result'); break; }
                     if (this.game && this.game.driver && this.game.driver.tick) this.game.driver.tick();
                     if (!input.visible(input.el('hh_game')) && this.age() > 3000) { warn('game screen gone'); this.endGame(); this.set('hub'); }
                     // Where Is My Shot, Glass Stack, Order Up and Table Rush have no clock: they
@@ -320,11 +343,14 @@ const flow = {
                 }
                 case 'result': {
                     if (this.age() < config.resultWaitMs) break;
-                    const txt = (input.el('hh_rrRate') || {}).textContent || '';
-                    this.finishGame(txt.trim());
+                    if (!this.resultRecorded) { const txt = (input.el('hh_rrRate') || {}).textContent || ''; this.finishGame(txt.trim()); this.resultRecorded = true; }
+                    // hold on the scoreboard until the user resumes, if asked
+                    if (config.pauseOnResult && !this.heldResult) { this.heldResult = true; this.pause(); break; }
+                    if (this.paused) break;
                     // never a name, never SUBMIT: only OK
                     const ok = input.el('hh_rrDone');
                     if (ok) input.click(ok);
+                    this.resultRecorded = false;
                     this.set('hub');
                     break;
                 }

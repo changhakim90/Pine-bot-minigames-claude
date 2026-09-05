@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — pick the game, choose when to start, hold on the scoreboard (2026-09-05)
+
+- Panel game picker: a dropdown of all 13 games (or "All games") and a **play**
+  button — play just one game on repeat, or the whole set. `pineMini.play('TIP CATCH')`
+  / `pineMini.play('ALL')` do the same from the console.
+- **auto-start** checkbox (and `set('auto', false)`): when off, the bot waits on
+  page load until you press play or resume, so you choose when it begins.
+- **hold on scoreboard** checkbox (and `set('pauseOnResult', true)`): the bot
+  records the score, then holds on the result screen instead of pressing OK;
+  **resume** presses OK and moves on. The status line shows
+  "SCOREBOARD — press resume".
+
 ## 0.5.4 — Glass Stack rewritten stateless (2026-09-05)
 
 Live diag showed Glass Stack frozen at a level (`waited: 0`, `prevX` stuck): the

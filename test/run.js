@@ -191,6 +191,37 @@ test('pause freezes the loop and keeps the round; resume continues it', () => {
     pm.flow.stop();
 });
 
+test('play(name) picks one game; play(ALL) restores the set', () => {
+    const pm = makeEnv({ auto: false }).window.pineMini;
+    pm.play('GLASS STACK');
+    eq(pm.config.games, ['GLASS STACK']);
+    assert.ok(pm.flow.timer, 'play starts the bot');
+    pm.play('ALL');
+    assert.strictEqual(pm.config.games.length, 13);
+    assert.strictEqual(pm.play('NOPE GAME'), 'unknown game: NOPE GAME');
+    pm.flow.stop();
+});
+
+test('hold on scoreboard: bot pauses on the result and resume presses OK', () => {
+    const env = makeEnv({ auto: false, pauseOnResult: true, resultWaitMs: 0 });
+    const pm = env.window.pineMini;
+    const hh = env.el('happyHour'); hh.classList.add('on');
+    const rr = env.el('hh_roundResult'); const rate = env.el('hh_rrRate'); rate.textContent = '42 STACKED!';
+    let okClicks = 0; const ok = env.el('hh_rrDone'); ok.onclick = () => okClicks++;
+    pm.flow.start();
+    pm.flow.game = { name: 'GLASS STACK', frames: 5, t0: 0, params: {}, ctx: {}, driver: {} };
+    pm.flow.state = 'result'; pm.flow.since = pm.flow.since - 10000; pm.flow.resultRecorded = false;
+    pm.flow.tick();
+    assert.strictEqual(pm.flow.heldResult, true, 'held on the scoreboard');
+    assert.strictEqual(pm.flow.paused, true, 'and paused');
+    assert.strictEqual(okClicks, 0, 'OK not pressed while holding');
+    pm.resume();
+    assert.strictEqual(okClicks, 1, 'resume presses OK');
+    assert.strictEqual(pm.flow.heldResult, false);
+    assert.strictEqual(pm.flow.state, 'hub');
+    pm.flow.stop();
+});
+
 test('result screen: OK only — never the name field or SUBMIT', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'dist', 'pine-mini.user.js'), 'utf8');
     assert.ok(!/hh_rrSubmit|hh_rrName/.test(src), 'no reference to the submit button or the name field');

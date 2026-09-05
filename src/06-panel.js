@@ -10,7 +10,12 @@ const panel = {
         el.id = 'pineMiniPanel';
         el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;background:rgba(10,12,10,.88);color:#e8e6dd;font:11px/1.5 monospace;padding:8px 10px;border:1px solid #3a7d4f;border-radius:6px;max-width:330px;pointer-events:auto;white-space:pre-wrap';
         el.addEventListener('pointerdown', e => e.stopPropagation());
-        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div><div style="margin-top:6px"><button id="pmPause">pause</button> <button id="pmResume">resume</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div></div>'
+        const opts = ['<option value="">All games (loop)</option>'].concat(GAME_NAMES.map(n => '<option value="' + n + '">' + n + '</option>')).join('');
+        el.innerHTML = '<div id="pmBody"><div id="pmTxt"></div>'
+            + '<div style="margin-top:6px;display:flex;gap:4px"><select id="pmGame" style="flex:1;min-width:0;background:#14170f;color:#e8e6dd;border:1px solid #3a7d4f;font:11px monospace">' + opts + '</select> <button id="pmPlay">play</button></div>'
+            + '<div style="margin-top:6px"><button id="pmPause">pause</button> <button id="pmResume">resume</button> <button id="pmSkip">skip</button> <button id="pmBoard">board</button> <button id="pmHide">hide</button></div>'
+            + '<div style="margin-top:5px;font-size:10px;opacity:.85"><label><input type="checkbox" id="pmHold"> hold on scoreboard</label> &nbsp; <label><input type="checkbox" id="pmAuto"> auto-start</label></div>'
+            + '</div>'
             + '<button id="pmShow" hidden style="all:unset;cursor:pointer;padding:2px 6px;color:#e6b450;font:11px monospace">▸ PineMini</button>';
         d.body.appendChild(el);
         this.el = el;
@@ -20,6 +25,13 @@ const panel = {
         this.resumeBtn = el.querySelector('#pmResume');
         this.pauseBtn.onclick = () => { api.pause(); this.render(); };
         this.resumeBtn.onclick = () => { api.resume(); this.render(); };
+        const sel = el.querySelector('#pmGame');
+        sel.value = (config.games && config.games.length === 1) ? config.games[0] : '';
+        el.querySelector('#pmPlay').onclick = () => { flow.play(sel.value || 'ALL'); this.render(); };
+        const hold = el.querySelector('#pmHold'); hold.checked = !!config.pauseOnResult;
+        hold.onchange = () => api.set('pauseOnResult', hold.checked);
+        const auto = el.querySelector('#pmAuto'); auto.checked = !!config.auto;
+        auto.onchange = () => api.set('auto', auto.checked);
         el.querySelector('#pmSkip').onclick = () => api.skip();
         el.querySelector('#pmBoard').onclick = () => board.refresh().then(() => this.render());
         // hide collapses to a chip that brings it back — never to nothing
@@ -37,7 +49,8 @@ const panel = {
         if (this.pauseBtn) { this.pauseBtn.disabled = !running; this.pauseBtn.textContent = flow.paused ? 'paused' : 'pause'; }
         if (this.resumeBtn) this.resumeBtn.disabled = running;
         const g = flow.game;
-        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + (!flow.timer ? 'STOPPED' : flow.paused ? 'PAUSED' : flow.state) + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
+        const status = !flow.timer ? 'STOPPED' : flow.heldResult ? 'SCOREBOARD — press resume' : flow.paused ? 'PAUSED' : flow.state;
+        const lines = ['PineMini v' + SCRIPT_VERSION + '  ' + status + (g ? '  ' + g.name + ' (' + g.frames + 'f)' : '')];
         const last = flow.results[flow.results.length - 1];
         if (last) lines.push('last: ' + last.name + ' → ' + last.txt + (last.best ? ' ★' : ''));
         for (const n of config.games) {
@@ -61,7 +74,8 @@ const api = {
     pause() { flow.pause(); return flow.paused ? 'paused' : (flow.timer ? 'running' : 'stopped'); },
     resume() { if (!flow.timer) { flow.start(); return 'started'; } flow.resume(); return flow.paused ? 'paused' : 'running'; },
     skip() { if (flow.game) { log('skipping', flow.game.name); flow.endGame(); } const ok = input.el('hh_rrDone'); const bb = input.el('hh_backBtn'); if (ok && input.visible(input.el('hh_roundResult'))) input.click(ok); else if (bb && !bb.classList.contains('hidden')) input.click(bb); flow.set('hub'); return 'skipped'; },
-    play(name) { name = String(name || '').toUpperCase(); if (!drivers[name]) return 'unknown game: ' + name; flow.queue.unshift(name); if (!flow.timer) flow.start(); return 'queued ' + name; },
+    play(name) { return flow.play(name); },
+    games(list) { if (list) { config.games = (Array.isArray(list) ? list : [list]).map(n => String(n).toUpperCase()).filter(n => drivers[n]); api.set('games', config.games); } return config.games; },
     set(k, v) { config[k] = v; store.set('config', Object.assign(store.get('config', {}), { [k]: v })); return config; },
     status() {
         const g = flow.game;

@@ -71,6 +71,7 @@ const DEFAULT_CONFIG = {
     stallFrames: 3600,      // frames a driver may go without acting before the round is abandoned (~1 min)
     targets: {},            // per-game target override, e.g. {'ORDER UP!': 60}
     resultWaitMs: 900,      // read the result screen this long before pressing OK
+    pauseOnResult: false,   // hold on the scoreboard until the user resumes (then press OK)
     max: true,              // unbounded games play for the most the round allows (below); false = board #1 + margin
     roundBudgetMin: 12,     // max mode: minutes an endless round may run before the driver ends it on purpose
     margin: 0.10,           // (max: false) unbounded games aim this far above the board's #1 (fraction)
