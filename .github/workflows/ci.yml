@@ -21,6 +21,8 @@ jobs:
         run: npm install --no-save playwright@1.47.2 && npx playwright install --with-deps chromium
       - name: end to end — every game against the reference page
         run: node test/e2e.js --pages 4 --timeout 420
+      - name: end to end — max mode (target = infinity)
+        run: node test/e2e.js --max --pages 4 --timeout 480
       - uses: actions/upload-artifact@v4
         with:
           name: pine-mini.user.js

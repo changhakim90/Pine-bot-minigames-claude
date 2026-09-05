@@ -32,6 +32,7 @@ const EXPECT = {
     'TABLE RUSH': m => m.v >= 6
 };
 // e2e targets are lower than the defaults so the run stays short
+const MAX_EXPECT = { 'ORDER UP!': m => m.v >= 2, 'WHERE IS MY SHOT?': m => m.v >= 2, 'GLASS STACK': m => m.v >= 8, 'ICE CARVING': m => m.v >= 800, 'CHAMPAGNE LAUNCH': m => m.v >= 1000, 'TABLE RUSH': m => m.v >= 3 };
 const E2E_TARGET = Object.assign({ 'ICE CARVING': 60, 'CHAMPAGNE LAUNCH': 300, 'ORDER UP!': 8, 'WHERE IS MY SHOT?': 8, 'GLASS STACK': 20, 'TABLE RUSH': 6 }, flag('--targets', null) ? JSON.parse(flag('--targets')) : {});   // --targets '{"TABLE RUSH":15}'
 
 function chromePath() {
@@ -77,7 +78,8 @@ function chromePath() {
     for (const g of games) {
         const r = results[g];
         const m = r && r.txt && (() => { const mm = String(r.txt).match(/-?\d+(?:\.\d+)?/); return mm ? { v: parseFloat(mm[0]), low: /[±⏱]/.test(r.txt) } : null; })();
-        const ok = !!(m && (!EXPECT[g] || EXPECT[g](m)));
+        const chk = (maxMode && MAX_EXPECT[g]) || EXPECT[g];
+        const ok = !!(m && (!chk || chk(m)));
         if (!ok) fail++;
         console.log((ok ? 'PASS ' : 'FAIL ') + g.padEnd(18) + (r ? r.txt + '  (' + (r.ms / 1000).toFixed(1) + 's)' : 'no result'));
     }
