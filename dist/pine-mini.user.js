@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Pine & Co Minigame Bot
 // @namespace    https://pineandco.online/
-// @version      0.6.0
+// @version      0.6.1
 // @description  Autonomous record-chasing player for the Pine & Co "Bartender's Happy Hour" mini games. Watches the game's own canvas draw calls, drives every game with frame-exact synthetic input, plays the whole set on its own, tunes itself from its results and never submits a name to the leaderboard.
 // @author       you
 // @match        https://pineandco.online/*
@@ -42,7 +42,7 @@
  * ===================================================================== */
 (function () {
 'use strict';
-const SCRIPT_VERSION = '0.6.0';
+const SCRIPT_VERSION = '0.6.1';
 const TAG = '[PineMini]';
 const NS = 'pineMini_';
 const W = (typeof window !== 'undefined') ? window : globalThis;
@@ -1470,11 +1470,15 @@ defineDriver('GLASS STACK', {
 });
 
 // ---------------------------------------------------------------- TABLE RUSH
-// Waiter 118 px/s per axis (diagonals are faster), mobs of radius 10–12.6
-// wander or stand. Every frame a receding-horizon search over three-segment
-// key plans (9³ actions, 0.35 s) picks the move that reaches the table soonest
-// without touching anyone. Touching a guest costs a glass but grants 1.5 s of
-// invulnerability, and every cleared stage gives a glass back — so once the hall
+// Waiter 118 px/s per axis (diagonals are faster); guests of radius 10–12.6
+// either stand still or walk straight at a constant speed, turning every
+// 0.5–1.8 s and bouncing off the walls. Each guest's velocity is tracked over a
+// short window and projected forward (bounces included), and a receding-horizon
+// search over three-segment key plans (9³ actions, 0.6 s at 33 ms) checks the
+// waiter's path against every projected guest at every step. Touching a guest
+// costs a glass but grants 1.5 s of invulnerability, and every cleared stage
+// gives a glass back — so with two or more glasses the planner will spend one
+// for real progress, and on the last glass it avoids at almost any cost. Once the hall
 // is crowded the planner may spend one hit per stage (keeping two glasses in
 // reserve) as passage. In max mode the round ends when the game ends it.
 const TR_ACTS = []; for (let iy = -1; iy <= 1; iy++) for (let ix = -1; ix <= 1; ix++) TR_ACTS.push([ix, iy]);
@@ -1482,7 +1486,7 @@ defineDriver('TABLE RUSH', {
     kind: 'unbounded', defaultTarget: 15,
     tunables: { safety: { min: 1, max: 9, step: 2, init: 5, explore: 0.2 } },
     make(ctx) {
-        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], dying = false, lastPlanT = 0, bestY = 1e9, stuckFrames = 0;
+        let stage = 0, me = { x: 200, y: 424 }, prevMobs = [], tracks = [], invUntil = 0, glasses = 3, keysDown = {}, act = [0, 0], dying = false, lastPlanT = 0, lastPlanCost = 0;
         const setKeys = a => {
             const want = { d: a[0] > 0, a: a[0] < 0, s: a[1] > 0, w: a[1] < 0 };
             for (const k in want) { if (!!keysDown[k] !== want[k]) { input.key(k, want[k]); keysDown[k] = want[k]; } }
@@ -1497,7 +1501,7 @@ defineDriver('TABLE RUSH', {
                 ctx.alive();
                 const lv = +st.m[1];
                 const t = F.t, dt = F.dt;
-                if (lv !== stage) { stage = lv; prevMobs = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastPlanT = 0; bestY = 1e9; stuckFrames = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - (ctx.t0 || 0)) / 1000).toFixed(1) + 's'); }
+                if (lv !== stage) { stage = lv; prevMobs = []; tracks = []; me = { x: 200, y: 424 }; invUntil = t + 1000 - dt * 1000; lastPlanT = 0; if (config.verbose) ctx.log('stage', lv, 'glasses', glasses, 'at', ((t - (ctx.t0 || 0)) / 1000).toFixed(1) + 's'); }
                 // glasses HUD: arcs at y=25, gold = alive
                 const arcs = F.arcs.filter(o => Math.abs(o.y - 25) < 0.6 && Math.abs(o.r - 7) < 0.6);
                 if (arcs.length === 3) {
@@ -1511,64 +1515,102 @@ defineDriver('TABLE RUSH', {
                 const w = F.img('dg_waiter')[0] || F.arcs.filter(o => Math.abs(o.r - 17.5) < 0.6).map(o => ({ cx: o.x, cy: o.y }))[0];
                 if (w) me = { x: w.cx, y: w.cy };
                 else { me.x = clamp(me.x + act[0] * 118 * dt, 20, 380); me.y = clamp(me.y + act[1] * 118 * dt, 78, 434); if (Math.floor(t / 90) % 2 === 0) invUntil = Math.max(invUntil, t + 1); }
-                // mobs with velocity from the previous frame
-                const mobs = [];
+                // ── guest tracking: identity by nearest neighbour, velocity over a ~120 ms window ──
+                // (a single-frame difference is sub-pixel noise at 240 Hz; the window gives a
+                // stable heading. Guests walk straight at constant speed between turns and
+                // bounce off the walls, so a linear projection is exact until their next turn.)
                 const drawn = F.imgs.filter(o => /^dg_cust/.test(o.src));
                 const seen = drawn.length ? drawn : F.arcs.filter(o => Math.abs(o.r - 15) < 0.6).map(o => ({ cx: o.x, cy: o.y }));
+                const mobs = [];
                 for (const o of seen) {
-                    let m = null, bd = 14;
-                    for (const p of prevMobs) { if (p.used) continue; const d = hypot(p.x - o.cx, p.y - o.cy); if (d < bd) { bd = d; m = p; } }
-                    let vx = 0, vy = 0;
-                    if (m) { m.used = true; vx = (o.cx - m.x) / dt; vy = (o.cy - m.y) / dt; if (hypot(vx, vy) < 8) vx = vy = 0; vx = m.vx * 0.4 + vx * 0.6; vy = m.vy * 0.4 + vy * 0.6; }
-                    mobs.push({ x: o.cx, y: o.cy, vx, vy });
+                    let tr = null, bd = 18;
+                    for (const p of tracks) { if (p.used) continue; const d = hypot(p.x - o.cx, p.y - o.cy); if (d < bd) { bd = d; tr = p; } }
+                    if (!tr) tr = { hist: [], vx: 0, vy: 0 };
+                    tr.used = true; tr.x = o.cx; tr.y = o.cy;
+                    tr.hist.push({ t, x: o.cx, y: o.cy });
+                    while (tr.hist.length > 2 && t - tr.hist[0].t > 130) tr.hist.shift();
+                    const h0 = tr.hist[0], span = (t - h0.t) / 1000;
+                    if (span >= 0.04) {
+                        let vx = (o.cx - h0.x) / span, vy = (o.cy - h0.y) / span;
+                        if (hypot(vx, vy) < 6) vx = vy = 0;                    // standing guests: static
+                        tr.vx = tr.vx * 0.5 + vx * 0.5; tr.vy = tr.vy * 0.5 + vy * 0.5;
+                    }
+                    mobs.push(tr);
                 }
+                tracks = mobs.map(m => { m.used = false; return m; });
                 prevMobs = mobs;
                 const target = ctx.target.v;
                 dying = isFinite(target) && lv > target;
-                // the game collides at m.r (10–12.6) + me.r (12); `safety` is our margin
-                const R = 12.6 + 12 + ctx.params.safety;
                 const invLeft = (invUntil - t) / 1000;
 
-                // upward progress bookkeeping (a hit knocks us back, so "no new best y" = walled)
-                if (me.y < bestY - 2) { bestY = me.y; stuckFrames = 0; } else stuckFrames += 1;
-                const stuck = stuckFrames * dt > 0.7;
-
-                // Re-plan on a throttled clock (~45 ms), not every rendered frame. Deciding
-                // 240×/s made the choice flip frame to frame, so the waiter jittered in place.
-                // Between plans the keys are simply held, so it commits and crosses the floor.
-                if (t - lastPlanT >= 45) {
+                // ── receding-horizon search over key plans, every ~40 ms ──
+                // The path is checked against every guest's projected position at EVERY step,
+                // not just where a move ends — a guest crossing the lane mid-way is seen.
+                // A collision while the shield is up is free; otherwise it costs a glass, and the
+                // penalty scales with how many we have: with two or more the planner will spend
+                // one for real progress (the 1.5 s shield plus the glass a cleared stage refunds
+                // is worth more than waiting); on the last glass it avoids at almost any cost.
+                if (t - lastPlanT >= 40) {
                     lastPlanT = t;
-                    const preds = [0.12, 0.28].map(La => mobs.map(m => ({ x: m.x + m.vx * La, y: m.y + m.vy * La })));
-                    // climb to the table (y↓), then centre on x=200
-                    const goalPot = (x, y) => 1.5 * Math.max(0, y - 80) + Math.max(0, Math.abs(x - 200) - 30) * (y < 140 ? 2.2 : 0.7);
-                    const RR = R + 14;
-                    const repel = (x, y) => { let r = 0; for (const pred of preds) for (const m of pred) { const d = hypot(m.x - x, m.y - y); if (d < RR) r += (RR - d) * 16; } return r; };
-                    const spd = 118 * 0.15;
-                    const pick = useRepel => {
-                        let best = null;
-                        for (const a of TR_ACTS) {
-                            const nx = clamp(me.x + a[0] * spd, 20, 380), ny = clamp(me.y + a[1] * spd, 78, 430);
-                            const keep = (a[0] === act[0] && a[1] === act[1]) ? -8 : 0;
-                            const idle = (a[0] === 0 && a[1] === 0) ? 6 : 0;
-                            const v = goalPot(nx, ny) + (useRepel ? repel(nx, ny) : 0) + keep + idle;
-                            if (!best || v < best.v) best = { v, a };
+                    const step = 1 / 30, H = 18, SEG = 6;                       // 0.6 s in three segments
+                    const R = 12.6 + 12 + ctx.params.safety;
+                    // per-guest projection with wall bounces, precomputed per step
+                    const near = mobs.filter(m => hypot(m.x - me.x, m.y - me.y) < 118 * 1.45 * 0.6 + 120)
+                        .sort((a, b) => hypot(a.x - me.x, a.y - me.y) - hypot(b.x - me.x, b.y - me.y)).slice(0, 16);
+                    const px = [], py = [], pr = [];
+                    for (const m of near) {
+                        const xs = [], ys = [];
+                        let x = m.x, y = m.y, vx = m.vx, vy = m.vy;
+                        for (let k = 1; k <= H; k++) {
+                            x += vx * step; y += vy * step;
+                            if (x < 22) { x = 22; vx = Math.abs(vx); } else if (x > 378) { x = 378; vx = -Math.abs(vx); }
+                            if (y < 118) { y = 118; vy = Math.abs(vy); } else if (y > 420) { y = 420; vy = -Math.abs(vy); }
+                            xs.push(x); ys.push(y);
                         }
-                        return best.a;
+                        px.push(xs); py.push(ys);
+                        pr.push(R + Math.min(10, hypot(m.vx, m.vy) * 0.06));   // faster guest → wider berth
+                    }
+                    // price of a hit by reserve: free-ish with a full tray, dear with two, near-forbidden on the last glass
+                    const hitCost = dying ? -1 : (glasses >= 3 ? 420 : glasses === 2 ? 1300 : 5000);
+                    const spd = 118 * step;
+                    const goalPot = (x, y) => 1.5 * Math.max(0, y - 80) + Math.max(0, Math.abs(x - 200) - 30) * (y < 140 ? 2.2 : 0.7);
+                    const sim = (a, b, c) => {
+                        let x = me.x, y = me.y, inv = invLeft, cost = 0;
+                        for (let k = 1; k <= H; k++) {
+                            const ac = k <= SEG ? a : k <= 2 * SEG ? b : c;
+                            x = clamp(x + ac[0] * spd, 20, 380); y = clamp(y + ac[1] * spd, 78, 430);
+                            if (inv > 0) inv -= step;
+                            else {
+                                for (let i = 0; i < px.length; i++) {
+                                    const dx = px[i][k - 1] - x, dy = py[i][k - 1] - y;
+                                    if (dx * dx + dy * dy < pr[i] * pr[i]) {
+                                        if (dying) return -1000 + k;             // pinned target: seek the hit
+                                        cost += hitCost + (H - k) * 12;          // earlier hit = worse
+                                        inv = 1.5;                               // shielded from here on
+                                        const ang = Math.atan2(y - py[i][k - 1], x - px[i][k - 1]);
+                                        x = clamp(x + Math.cos(ang) * 26, 20, 380); y = clamp(y + Math.sin(ang) * 26, 78, 430);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (y < 92 && Math.abs(x - 200) < 44) return cost - (H - k) * 8;   // table reached: sooner is better
+                        }
+                        return cost + goalPot(x, y);
                     };
                     if (dying) {
-                        // deliberate loss (a pinned target): walk into the nearest guest
                         let n = null, nd = 1e9;
                         for (const m of mobs) { const d = hypot(m.x - me.x, m.y - me.y); if (d < nd) { nd = d; n = m; } }
                         act = n ? [Math.sign(n.x - me.x), Math.sign(n.y - me.y)] : [0, 1];
-                    } else if (invLeft > 0.15) {
-                        // invulnerable: ignore the crowd and sprint for the table
-                        act = pick(false);
-                    } else if (stuck && glasses > 1) {
-                        // walled by the crowd with a glass to spare: punch straight toward the goal,
-                        // take the hit, and the 1.5 s shield that follows carries us through
-                        act = pick(false);
                     } else {
-                        act = pick(true);
+                        let best = null;
+                        for (const a of TR_ACTS) for (const b of TR_ACTS) for (const c of TR_ACTS) {
+                            let v = sim(a, b, c);
+                            if (a[0] === act[0] && a[1] === act[1]) v -= 6;          // hysteresis
+                            if (a[0] === 0 && a[1] === 0) v += 4;                    // idling is rarely right
+                            if (!best || v < best.v) best = { v, a };
+                        }
+                        act = best ? best.a : [0, -1];
+                        lastPlanCost = best ? best.v : 0;
                     }
                 }
                 setKeys(act);
@@ -1577,7 +1619,7 @@ defineDriver('TABLE RUSH', {
             },
             stop() { setKeys([0, 0]); },
             result(m) { setKeys([0, 0]); ctx.log('stage', m && m.v, 'target', isFinite(ctx.target.v) ? ctx.target.v : 'max'); },
-            state() { return { stage, glasses, dying, me: { x: Math.round(me.x), y: Math.round(me.y) }, mobs: prevMobs.length, act, invMs: Math.max(0, Math.round(invUntil - (api.frame ? api.frame.t : 0))) }; }
+            state() { return { stage, glasses, dying, me: { x: Math.round(me.x), y: Math.round(me.y) }, mobs: prevMobs.length, moving: prevMobs.filter(m => hypot(m.vx, m.vy) > 6).length, act, planCost: Math.round(lastPlanCost), invMs: Math.max(0, Math.round(invUntil - (api.frame ? api.frame.t : 0))) }; }
         };
     }
 });

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.1 — Table Rush reads the guests and threads through them (2026-09-10)
+
+The previous avoider only sampled a repulsion field where a move *ended*, so a
+guest crossing the lane mid-way still hit the waiter. Rewritten as a real
+predictive planner:
+
+- every guest is tracked by identity, with its velocity measured over a ~120 ms
+  window (single-frame differences are sub-pixel noise at 240 Hz) and
+  classified standing vs walking;
+- walkers are projected forward with the game's own wall bounces (they walk
+  straight at constant speed between turns), faster ones get a wider berth;
+- a receding-horizon search over three-segment key plans (9³, 0.6 s at a fixed
+  33 ms step) checks the waiter's path against every projected guest at
+  **every** step, and reaching the table sooner scores higher;
+- a hit while shielded is free; otherwise its price scales with the tray —
+  cheap with three glasses (the 1.5 s shield plus the refunded glass is worth
+  more than waiting), dear with two, near-forbidden on the last.
+
+Max mode on the reference page: **STAGE 22** in 144 s with 0–1 hits per stage
+(the 0.6.0 planner died at stage 7). Finite target 15: reached with 9 / 7 hits.
+
 ## 0.6.0 — pick the game, choose when to start, hold on the scoreboard (2026-09-05)
 
 - Panel game picker: a dropdown of all 13 games (or "All games") and a **play**

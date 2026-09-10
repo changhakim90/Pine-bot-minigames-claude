@@ -1,6 +1,6 @@
 {
   "name": "pine-bot-minigames",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Record-chasing bot for the Pine & Co (pineandco.online) mini games \u2014 userscript built from src/, tested headless, auto-updates through Violentmonkey/Tampermonkey from GitHub.",
   "private": true,
   "scripts": {
